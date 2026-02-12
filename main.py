@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from dataclasses import replace
+import json
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +11,7 @@ from PIL import Image
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from cb_color_correct.filters import FilterPreset, presets
-from cb_color_correct.image_ops import FilterParams, process_rgb8
+from cb_color_correct.image_ops import FilterParams, process_rgb8_stack
 from cb_color_correct.lut import CubeParseError, load_cube
 
 
@@ -41,9 +43,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("CB Color Correct")
 
         self._loaded: LoadedImage | None = None
-        self._current_params = FilterParams()
+        self._base_params = FilterParams()
+        self._adjust_params = FilterParams()
         self._strength = 1.0
         self._base_pixmap: QtGui.QPixmap | None = None
+
+        self._apply_timer = QtCore.QTimer(self)
+        self._apply_timer.setSingleShot(True)
+        self._apply_timer.timeout.connect(self._apply_current)
 
         self._presets = presets()
         self._category_order = [
@@ -52,6 +59,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Lo-Fi",
             "Wild",
             "Black & White",
+            "User",
             "LUTs",
         ]
 
@@ -67,11 +75,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.load_btn = QtWidgets.QPushButton("Load Image…")
         self.load_lut_btn = QtWidgets.QPushButton("Load LUT…")
+        self.load_preset_btn = QtWidgets.QPushButton("Load Preset…")
+        self.save_preset_btn = QtWidgets.QPushButton("Save Preset…")
         self.save_btn = QtWidgets.QPushButton("Save As…")
         self.save_btn.setEnabled(False)
 
         left_layout.addWidget(self.load_btn)
         left_layout.addWidget(self.load_lut_btn)
+        left_layout.addWidget(self.load_preset_btn)
+        left_layout.addWidget(self.save_preset_btn)
         left_layout.addWidget(self.save_btn)
 
         self.preset_tree = QtWidgets.QTreeWidget()
@@ -83,20 +95,17 @@ class MainWindow(QtWidgets.QMainWindow):
         left_layout.addWidget(QtWidgets.QLabel("Presets"))
         left_layout.addWidget(self.preset_tree, 1)
 
-        self.strength_label = QtWidgets.QLabel("Strength: 100%")
-        self.strength_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.strength_slider.setRange(0, 100)
-        self.strength_slider.setValue(100)
-
-        left_layout.addWidget(self.strength_label)
-        left_layout.addWidget(self.strength_slider)
-
         self.reset_btn = QtWidgets.QPushButton("Reset")
         left_layout.addWidget(self.reset_btn)
 
         layout.addWidget(left)
 
-        # Right preview
+        # Right side: preview + adjustments sidebar
+        right = QtWidgets.QWidget()
+        right_layout = QtWidgets.QHBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+
         self.image_label = QtWidgets.QLabel("Load an image to begin")
         self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.image_label.setMinimumSize(640, 480)
@@ -104,15 +113,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll = QtWidgets.QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setWidget(self.image_label)
-        layout.addWidget(self.scroll, 1)
+        right_layout.addWidget(self.scroll, 1)
+
+        # Collapsible adjustments sidebar
+        self.sidebar_container = QtWidgets.QWidget()
+        self.sidebar_container.setObjectName("SidebarContainer")
+        container_layout = QtWidgets.QVBoxLayout(self.sidebar_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(8)
+
+        self.sidebar_toggle = QtWidgets.QToolButton()
+        self.sidebar_toggle.setCheckable(True)
+        self.sidebar_toggle.setChecked(False)  # collapsed by default
+        self.sidebar_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.sidebar_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.sidebar_toggle.setText("Adjustments")
+        container_layout.addWidget(self.sidebar_toggle)
+
+        self.adjust_sidebar = QtWidgets.QWidget()
+        self.adjust_sidebar.setObjectName("AdjustSidebar")
+        sidebar_layout = QtWidgets.QVBoxLayout(self.adjust_sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(10)
+
+        self.strength_label = QtWidgets.QLabel("Strength: 100%")
+        self.strength_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.strength_slider.setRange(0, 100)
+        self.strength_slider.setValue(100)
+        sidebar_layout.addWidget(self.strength_label)
+        sidebar_layout.addWidget(self.strength_slider)
+
+        self._adjust_scroll = QtWidgets.QScrollArea()
+        self._adjust_scroll.setWidgetResizable(True)
+        self._adjust_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        adjust_root = QtWidgets.QWidget()
+        self._adjust_scroll.setWidget(adjust_root)
+        self._adjust_layout = QtWidgets.QVBoxLayout(adjust_root)
+        self._adjust_layout.setContentsMargins(0, 0, 0, 0)
+        self._adjust_layout.setSpacing(8)
+        self._build_adjustment_widgets()
+        sidebar_layout.addWidget(self._adjust_scroll, 1)
+
+        container_layout.addWidget(self.adjust_sidebar, 1)
+        right_layout.addWidget(self.sidebar_container)
+
+        self._set_adjustments_visible(False)
+
+        layout.addWidget(right, 1)
 
         # Wire up
         self.load_btn.clicked.connect(self._on_load)
         self.load_lut_btn.clicked.connect(self._on_load_lut)
+        self.load_preset_btn.clicked.connect(self._on_load_preset)
+        self.save_preset_btn.clicked.connect(self._on_save_preset)
         self.save_btn.clicked.connect(self._on_save)
         self.reset_btn.clicked.connect(self._on_reset)
         self.preset_tree.currentItemChanged.connect(self._on_preset_item_changed)
         self.strength_slider.valueChanged.connect(self._on_strength_change)
+        self.sidebar_toggle.toggled.connect(self._set_adjustments_visible)
 
         self._apply_current()
 
@@ -155,7 +213,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         out_path = Path(fn)
-        rgb8 = process_rgb8(self._loaded.original_rgb8, self._current_params, self._strength)
+        rgb8 = process_rgb8_stack(self._loaded.original_rgb8, [self._base_params, self._adjust_params], self._strength)
         Image.fromarray(rgb8, mode="RGB").save(out_path)
 
     def _on_load_lut(self) -> None:
@@ -184,9 +242,81 @@ class MainWindow(QtWidgets.QMainWindow):
             self._presets[existing_index] = preset
         self._rebuild_preset_tree(select_name=name)
 
+    def _on_save_preset(self) -> None:
+        name, ok = QtWidgets.QInputDialog.getText(self, "Preset Name", "Name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Preset",
+            str(Path.home() / f"{name}.json"),
+            "Preset JSON (*.json)",
+        )
+        if not fn:
+            return
+
+        payload = {
+            "name": name,
+            "category": "User",
+            "base": self._filterparams_to_dict(self._base_params),
+            "adjust": self._filterparams_to_dict(self._adjust_params),
+        }
+        Path(fn).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+        # Also add it to the in-app list for quick use.
+        combined = self._combine_params(self._base_params, self._adjust_params)
+        preset = FilterPreset(name=name, params=combined, category="User")
+        existing_index = next((i for i, p in enumerate(self._presets) if p.name == name and p.category == "User"), None)
+        if existing_index is None:
+            self._presets.append(preset)
+        else:
+            self._presets[existing_index] = preset
+        self._rebuild_preset_tree(select_name=name)
+
+    def _on_load_preset(self) -> None:
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load Preset",
+            str(Path.home()),
+            "Preset JSON (*.json);;All Files (*)",
+        )
+        if not fn:
+            return
+
+        try:
+            payload = json.loads(Path(fn).read_text(encoding="utf-8"))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Failed to load preset", str(e))
+            return
+
+        try:
+            name = str(payload.get("name") or Path(fn).stem)
+            category = str(payload.get("category") or "User")
+            base = self._filterparams_from_dict(payload.get("base") or {})
+            adjust = self._filterparams_from_dict(payload.get("adjust") or {})
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Invalid preset", str(e))
+            return
+
+        self._base_params = base
+        self._adjust_params = adjust
+        self._sync_adjustment_widgets_from_state()
+
+        combined = self._combine_params(base, adjust)
+        preset = FilterPreset(name=name, params=combined, category=category)
+        self._presets.append(preset)
+        if category not in self._category_order:
+            self._category_order.insert(-1, category)
+        self._rebuild_preset_tree(select_name=name)
+
     def _on_reset(self) -> None:
         self._select_preset_by_name("None")
         self.strength_slider.setValue(100)
+        self._adjust_params = FilterParams()
+        self._sync_adjustment_widgets_from_state()
+        self._schedule_apply()
 
     def _on_preset_item_changed(
         self,
@@ -204,8 +334,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if i < 0 or i >= len(self._presets):
             return
-        self._current_params = self._presets[i].params
-        self._apply_current()
+        self._base_params = self._presets[i].params
+        self._schedule_apply()
 
     def _select_preset_by_name(self, name: str) -> None:
         matches = [i for i, p in enumerate(self._presets) if p.name == name]
@@ -263,7 +393,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_strength_change(self, value: int) -> None:
         self._strength = float(value) / 100.0
         self.strength_label.setText(f"Strength: {value}%")
-        self._apply_current()
+        self._schedule_apply()
+
+    def _schedule_apply(self) -> None:
+        # Debounce rapid slider changes.
+        self._apply_timer.start(25)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -277,10 +411,276 @@ class MainWindow(QtWidgets.QMainWindow):
             self._base_pixmap = None
             return
 
-        rgb8 = process_rgb8(self._loaded.preview_rgb8, self._current_params, self._strength)
+        rgb8 = process_rgb8_stack(self._loaded.preview_rgb8, [self._base_params, self._adjust_params], self._strength)
         qimg = rgb8_to_qimage(rgb8)
         self._base_pixmap = QtGui.QPixmap.fromImage(qimg)
         self._refit_pixmap()
+
+    def _build_adjustment_widgets(self) -> None:
+        # Tone group
+        self.tone_group = QtWidgets.QGroupBox("Tone")
+        self.tone_group.setCheckable(True)
+        self.tone_group.setChecked(True)
+        tone_form = QtWidgets.QFormLayout(self.tone_group)
+        tone_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        tone_form.setContentsMargins(6, 6, 6, 6)
+        tone_form.setHorizontalSpacing(8)
+        tone_form.setVerticalSpacing(4)
+
+        self.exposure_slider, self.exposure_value = self._make_slider(-200, 200, 0, suffix=" st")
+        self.brightness_slider, self.brightness_value = self._make_slider(-20, 20, 0, suffix="")
+        self.contrast_slider, self.contrast_value = self._make_slider(-50, 50, 0, suffix="")
+
+        tone_form.addRow("Exposure", self._hbox(self.exposure_slider, self.exposure_value))
+        tone_form.addRow("Brightness", self._hbox(self.brightness_slider, self.brightness_value))
+        tone_form.addRow("Contrast", self._hbox(self.contrast_slider, self.contrast_value))
+
+        # Color group
+        self.color_group = QtWidgets.QGroupBox("Color")
+        self.color_group.setCheckable(True)
+        self.color_group.setChecked(True)
+        color_form = QtWidgets.QFormLayout(self.color_group)
+        color_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        color_form.setContentsMargins(6, 6, 6, 6)
+        color_form.setHorizontalSpacing(8)
+        color_form.setVerticalSpacing(4)
+
+        self.hue_slider, self.hue_value = self._make_slider(-180, 180, 0, suffix="°")
+        self.sat_slider, self.sat_value = self._make_slider(-100, 100, 0, suffix="")
+        self.vib_slider, self.vib_value = self._make_slider(-100, 100, 0, suffix="")
+
+        color_form.addRow("Hue", self._hbox(self.hue_slider, self.hue_value))
+        color_form.addRow("Saturation", self._hbox(self.sat_slider, self.sat_value))
+        color_form.addRow("Vibrance", self._hbox(self.vib_slider, self.vib_value))
+
+        # Levels group
+        self.levels_group = QtWidgets.QGroupBox("Levels")
+        self.levels_group.setCheckable(True)
+        self.levels_group.setChecked(True)
+        levels_form = QtWidgets.QFormLayout(self.levels_group)
+        levels_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        levels_form.setContentsMargins(6, 6, 6, 6)
+        levels_form.setHorizontalSpacing(8)
+        levels_form.setVerticalSpacing(4)
+
+        self.black_slider, self.black_value = self._make_slider(0, 20, 0, suffix="")
+        self.white_slider, self.white_value = self._make_slider(80, 100, 100, suffix="")
+        self.gamma_slider, self.gamma_value = self._make_slider(50, 150, 100, suffix="")
+
+        levels_form.addRow("Black", self._hbox(self.black_slider, self.black_value))
+        levels_form.addRow("White", self._hbox(self.white_slider, self.white_value))
+        levels_form.addRow("Gamma", self._hbox(self.gamma_slider, self.gamma_value))
+
+        self.reset_adjust_btn = QtWidgets.QPushButton("Reset Adjustments")
+
+        self._adjust_layout.addWidget(self.tone_group)
+        self._adjust_layout.addWidget(self.color_group)
+        self._adjust_layout.addWidget(self.levels_group)
+        self._adjust_layout.addWidget(self.reset_adjust_btn)
+        self._adjust_layout.addStretch(1)
+
+        # Signals
+        self.reset_adjust_btn.clicked.connect(self._on_reset_adjustments)
+
+        self.exposure_slider.valueChanged.connect(self._on_adjust_change)
+        self.brightness_slider.valueChanged.connect(self._on_adjust_change)
+        self.contrast_slider.valueChanged.connect(self._on_adjust_change)
+        self.hue_slider.valueChanged.connect(self._on_adjust_change)
+        self.sat_slider.valueChanged.connect(self._on_adjust_change)
+        self.vib_slider.valueChanged.connect(self._on_adjust_change)
+        self.black_slider.valueChanged.connect(self._on_adjust_change)
+        self.white_slider.valueChanged.connect(self._on_adjust_change)
+        self.gamma_slider.valueChanged.connect(self._on_adjust_change)
+
+        self._sync_adjustment_widgets_from_state()
+
+    def _on_reset_adjustments(self) -> None:
+        self._adjust_params = FilterParams()
+        self._sync_adjustment_widgets_from_state()
+        self._schedule_apply()
+
+    def _on_adjust_change(self) -> None:
+        # Read widgets -> update adjustment params.
+        exposure = self.exposure_slider.value() / 100.0
+        brightness = self.brightness_slider.value() / 100.0
+        contrast = self.contrast_slider.value() / 100.0
+        hue = float(self.hue_slider.value())
+        sat = self.sat_slider.value() / 100.0
+        vib = self.vib_slider.value() / 100.0
+
+        black = self.black_slider.value() / 100.0
+        white = self.white_slider.value() / 100.0
+        gamma = self.gamma_slider.value() / 100.0
+
+        # Update value labels
+        self.exposure_value.setText(f"{exposure:.2f} st")
+        self.brightness_value.setText(f"{brightness:.2f}")
+        self.contrast_value.setText(f"{contrast:.2f}")
+        self.hue_value.setText(f"{int(hue)}°")
+        self.sat_value.setText(f"{sat:.2f}")
+        self.vib_value.setText(f"{vib:.2f}")
+        self.black_value.setText(f"{black:.2f}")
+        self.white_value.setText(f"{white:.2f}")
+        self.gamma_value.setText(f"{gamma:.2f}")
+
+        # If group disabled, ignore its settings.
+        if not self.tone_group.isChecked():
+            exposure = 0.0
+            brightness = 0.0
+            contrast = 0.0
+        if not self.color_group.isChecked():
+            hue = 0.0
+            sat = 0.0
+            vib = 0.0
+        if not self.levels_group.isChecked():
+            black = 0.0
+            white = 1.0
+            gamma = 1.0
+
+        self._adjust_params = replace(
+            self._adjust_params,
+            exposure=exposure,
+            brightness=brightness,
+            contrast=contrast,
+            hue_degrees=hue,
+            saturation=sat,
+            vibrance=vib,
+            levels_black=black,
+            levels_white=white,
+            levels_gamma=gamma,
+        )
+        self._schedule_apply()
+
+    def _sync_adjustment_widgets_from_state(self) -> None:
+        # Block signals to avoid feedback loop.
+        widgets = [
+            self.exposure_slider,
+            self.brightness_slider,
+            self.contrast_slider,
+            self.hue_slider,
+            self.sat_slider,
+            self.vib_slider,
+            self.black_slider,
+            self.white_slider,
+            self.gamma_slider,
+        ]
+        for w in widgets:
+            w.blockSignals(True)
+
+        self.exposure_slider.setValue(int(round(self._adjust_params.exposure * 100.0)))
+        self.brightness_slider.setValue(int(round(self._adjust_params.brightness * 100.0)))
+        self.contrast_slider.setValue(int(round(self._adjust_params.contrast * 100.0)))
+        self.hue_slider.setValue(int(round(self._adjust_params.hue_degrees)))
+        self.sat_slider.setValue(int(round(self._adjust_params.saturation * 100.0)))
+        self.vib_slider.setValue(int(round(self._adjust_params.vibrance * 100.0)))
+
+        self.black_slider.setValue(int(round(self._adjust_params.levels_black * 100.0)))
+        self.white_slider.setValue(int(round(self._adjust_params.levels_white * 100.0)))
+        self.gamma_slider.setValue(int(round(self._adjust_params.levels_gamma * 100.0)))
+
+        for w in widgets:
+            w.blockSignals(False)
+
+        self._on_adjust_change()
+
+    def _make_slider(self, min_v: int, max_v: int, value: int, suffix: str = "") -> tuple[QtWidgets.QSlider, QtWidgets.QLabel]:
+        s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        s.setRange(min_v, max_v)
+        s.setValue(value)
+        s.setSingleStep(1)
+        lab = QtWidgets.QLabel("0")
+        lab.setMinimumWidth(52)
+        lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        return s, lab
+
+    def _set_adjustments_visible(self, visible: bool) -> None:
+        self.adjust_sidebar.setVisible(visible)
+        self.sidebar_toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow if visible else QtCore.Qt.ArrowType.RightArrow)
+        # Keep professional/compact: narrow when collapsed, comfortable when expanded
+        if visible:
+            self.sidebar_container.setMinimumWidth(320)
+            self.sidebar_container.setMaximumWidth(600)
+        else:
+            self.sidebar_container.setMinimumWidth(34)
+            self.sidebar_container.setMaximumWidth(34)
+
+    def _hbox(self, slider: QtWidgets.QSlider, label: QtWidgets.QLabel) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(slider, 1)
+        lay.addWidget(label)
+        return w
+
+    def _filterparams_to_dict(self, p: FilterParams) -> dict:
+        # Note: LUTs are intentionally not serialized (can be re-loaded via .cube).
+        return {
+            "exposure": p.exposure,
+            "brightness": p.brightness,
+            "contrast": p.contrast,
+            "saturation": p.saturation,
+            "vibrance": p.vibrance,
+            "hue_degrees": p.hue_degrees,
+            "levels_black": p.levels_black,
+            "levels_white": p.levels_white,
+            "levels_gamma": p.levels_gamma,
+            "curve_points": list(p.curve_points) if p.curve_points is not None else None,
+            "channel_mul": list(p.channel_mul),
+            "split_shadows": list(p.split_shadows),
+            "split_highlights": list(p.split_highlights),
+            "split_balance": p.split_balance,
+            "split_amount": p.split_amount,
+        }
+
+    def _filterparams_from_dict(self, d: dict) -> FilterParams:
+        curve = d.get("curve_points")
+        curve_points = None
+        if curve is not None:
+            curve_points = tuple((float(x), float(y)) for x, y in curve)
+        return FilterParams(
+            exposure=float(d.get("exposure", 0.0)),
+            brightness=float(d.get("brightness", 0.0)),
+            contrast=float(d.get("contrast", 0.0)),
+            saturation=float(d.get("saturation", 0.0)),
+            vibrance=float(d.get("vibrance", 0.0)),
+            hue_degrees=float(d.get("hue_degrees", 0.0)),
+            levels_black=float(d.get("levels_black", 0.0)),
+            levels_white=float(d.get("levels_white", 1.0)),
+            levels_gamma=float(d.get("levels_gamma", 1.0)),
+            curve_points=curve_points,
+            channel_mul=tuple(d.get("channel_mul", [1.0, 1.0, 1.0])),
+            split_shadows=tuple(d.get("split_shadows", [0.0, 0.0, 0.0])),
+            split_highlights=tuple(d.get("split_highlights", [0.0, 0.0, 0.0])),
+            split_balance=float(d.get("split_balance", 0.0)),
+            split_amount=float(d.get("split_amount", 0.0)),
+        )
+
+    def _combine_params(self, base: FilterParams, adjust: FilterParams) -> FilterParams:
+        # Combine into a single preset for saving into the tree. This is a simple additive/override blend.
+        # For more advanced workflows we can store base+adjust separately.
+        return FilterParams(
+            exposure=base.exposure + adjust.exposure,
+            brightness=base.brightness + adjust.brightness,
+            contrast=base.contrast + adjust.contrast,
+            saturation=base.saturation + adjust.saturation,
+            vibrance=base.vibrance + adjust.vibrance,
+            hue_degrees=base.hue_degrees + adjust.hue_degrees,
+            levels_black=max(0.0, base.levels_black + adjust.levels_black),
+            levels_white=min(1.0, base.levels_white * (adjust.levels_white if adjust.levels_white != 1.0 else 1.0)),
+            levels_gamma=base.levels_gamma * (adjust.levels_gamma if adjust.levels_gamma != 1.0 else 1.0),
+            curve_points=adjust.curve_points or base.curve_points,
+            channel_mul=(
+                base.channel_mul[0] * adjust.channel_mul[0],
+                base.channel_mul[1] * adjust.channel_mul[1],
+                base.channel_mul[2] * adjust.channel_mul[2],
+            ),
+            split_shadows=adjust.split_shadows if adjust.split_amount else base.split_shadows,
+            split_highlights=adjust.split_highlights if adjust.split_amount else base.split_highlights,
+            split_balance=base.split_balance + adjust.split_balance,
+            split_amount=max(base.split_amount, adjust.split_amount),
+            lut=base.lut if base.lut is not None else adjust.lut,
+        )
 
     def _refit_pixmap(self) -> None:
         if not self._base_pixmap or self._base_pixmap.isNull():
@@ -299,6 +699,54 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+
+    # Dark, professional theme (Fusion + palette + light QSS).
+    app.setStyle("Fusion")
+    pal = QtGui.QPalette()
+    pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(30, 30, 30))
+    pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(230, 230, 230))
+    pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(22, 22, 22))
+    pal.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(30, 30, 30))
+    pal.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(230, 230, 230))
+    pal.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(30, 30, 30))
+    pal.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(230, 230, 230))
+    pal.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(40, 40, 40))
+    pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(230, 230, 230))
+    pal.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor(255, 0, 0))
+    pal.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(60, 120, 200))
+    pal.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(255, 255, 255))
+    app.setPalette(pal)
+
+    app.setStyleSheet(
+        """
+        QMainWindow { background: #1e1e1e; }
+        QLabel { color: #e6e6e6; }
+        QPushButton, QToolButton {
+            padding: 4px 8px;
+            border: 1px solid #3a3a3a;
+            border-radius: 4px;
+            background: #2a2a2a;
+        }
+        QPushButton:hover, QToolButton:hover { background: #303030; }
+        QPushButton:pressed, QToolButton:pressed { background: #242424; }
+        QGroupBox {
+            border: 1px solid #3a3a3a;
+            border-radius: 4px;
+            margin-top: 8px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+        }
+        QTreeWidget, QListWidget { background: #161616; border: 1px solid #3a3a3a; }
+        QScrollArea { border: none; }
+        QSlider::groove:horizontal { height: 4px; background: #3a3a3a; border-radius: 2px; }
+        QSlider::handle:horizontal { width: 12px; margin: -6px 0; border-radius: 6px; background: #cfcfcf; }
+        QSlider::sub-page:horizontal { background: #3c78c8; border-radius: 2px; }
+        """
+    )
+
     w = MainWindow()
     w.resize(1200, 800)
     w.show()

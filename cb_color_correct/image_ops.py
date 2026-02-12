@@ -233,6 +233,15 @@ def process_rgb8(rgb8: np.ndarray, params: FilterParams, strength: float) -> np.
     return _to_uint8(mixed01)
 
 
+def process_rgb8_stack(rgb8: np.ndarray, params_stack: Sequence[FilterParams], strength: float) -> np.ndarray:
+    rgb01 = _to_float01(rgb8)
+    out01 = rgb01
+    for params in params_stack:
+        out01 = apply_params(out01, params)
+    mixed01 = blend(rgb01, out01, strength)
+    return _to_uint8(mixed01)
+
+
 def resize_for_preview(rgb8: np.ndarray, max_side: int = 1400) -> np.ndarray:
     h, w = rgb8.shape[:2]
     side = max(h, w)
