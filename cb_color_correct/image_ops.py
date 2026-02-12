@@ -4,8 +4,14 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import numpy as np
+from PIL import Image
 
 from .lut import CubeLut, apply_lut
+
+try:
+    import pilgram2 as pilgram
+except Exception:
+    pilgram = None
 
 
 ArrayF = np.ndarray
@@ -20,6 +26,24 @@ def _to_float01(rgb8: np.ndarray) -> ArrayF:
 def _to_uint8(rgb01: ArrayF) -> np.ndarray:
     rgb01 = np.clip(rgb01, 0.0, 1.0)
     return (rgb01 * 255.0 + 0.5).astype(np.uint8)
+
+
+def _apply_pilgram_filter(rgb01: ArrayF, filter_name: str) -> ArrayF:
+    if pilgram is None:
+        return rgb01
+
+    fn = getattr(pilgram, filter_name, None)
+    if fn is None or not callable(fn):
+        return rgb01
+
+    rgb8 = _to_uint8(rgb01)
+    pil_img = Image.fromarray(rgb8, mode="RGB")
+    try:
+        out_pil = fn(pil_img)
+    except Exception:
+        return rgb01
+    out_rgb8 = np.asarray(out_pil.convert("RGB"), dtype=np.uint8)
+    return _to_float01(out_rgb8)
 
 
 def luminance(rgb01: ArrayF) -> ArrayF:
@@ -325,6 +349,7 @@ class FilterParams:
     dehaze: float = 0.0
     vignette: float = 0.0
     vignette_midpoint: float = 0.5
+    pilgram_filter: str | None = None
     levels_black: float = 0.0
     levels_white: float = 1.0
     levels_gamma: float = 1.0
@@ -384,6 +409,8 @@ def apply_params(rgb01: ArrayF, params: FilterParams) -> ArrayF:
         out = apply_lut(out, params.lut)
     if params.vignette:
         out = apply_vignette(out, params.vignette, params.vignette_midpoint)
+    if params.pilgram_filter:
+        out = _apply_pilgram_filter(out, params.pilgram_filter)
     return np.clip(out, 0.0, 1.0)
 
 

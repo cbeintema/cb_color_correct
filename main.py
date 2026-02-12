@@ -147,6 +147,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._presets = presets()
         self._category_order = [
             "General",
+            "Instagram",
             "Film / Chemical",
             "Lo-Fi",
             "Wild",
@@ -1323,6 +1324,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "dehaze": p.dehaze,
             "vignette": p.vignette,
             "vignette_midpoint": p.vignette_midpoint,
+            "pilgram_filter": p.pilgram_filter,
             "levels_black": p.levels_black,
             "levels_white": p.levels_white,
             "levels_gamma": p.levels_gamma,
@@ -1369,6 +1371,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dehaze=float(d.get("dehaze", 0.0)),
             vignette=float(d.get("vignette", 0.0)),
             vignette_midpoint=float(d.get("vignette_midpoint", 0.5)),
+            pilgram_filter=(str(d.get("pilgram_filter")) if d.get("pilgram_filter") else None),
             levels_black=float(d.get("levels_black", 0.0)),
             levels_white=float(d.get("levels_white", 1.0)),
             levels_gamma=float(d.get("levels_gamma", 1.0)),
@@ -1403,6 +1406,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dehaze=base.dehaze + adjust.dehaze,
             vignette=base.vignette + adjust.vignette,
             vignette_midpoint=adjust.vignette_midpoint if adjust.vignette_midpoint != 0.5 else base.vignette_midpoint,
+            pilgram_filter=adjust.pilgram_filter if adjust.pilgram_filter else base.pilgram_filter,
             levels_black=max(0.0, base.levels_black + adjust.levels_black),
             levels_white=min(1.0, base.levels_white * (adjust.levels_white if adjust.levels_white != 1.0 else 1.0)),
             levels_gamma=base.levels_gamma * (adjust.levels_gamma if adjust.levels_gamma != 1.0 else 1.0),

@@ -16,7 +16,7 @@ class FilterPreset:
 
 def presets() -> List[FilterPreset]:
     # Values are tuned to be “creative” rather than physically accurate.
-    return [
+    items = [
         FilterPreset("None", FilterParams(), category="General"),
         FilterPreset(
             "Punchy",
@@ -548,6 +548,58 @@ def presets() -> List[FilterPreset]:
             category="Wild",
         ),
     ]
+
+    pilgram_names = [
+        "aden",
+        "amaro",
+        "ashby",
+        "brannan",
+        "brooklyn",
+        "charmes",
+        "clarendon",
+        "crema",
+        "dogpatch",
+        "earlybird",
+        "gingham",
+        "ginza",
+        "hefe",
+        "helena",
+        "hudson",
+        "inkwell",
+        "juno",
+        "kelvin",
+        "lark",
+        "lofi",
+        "ludwig",
+        "maven",
+        "mayfair",
+        "moon",
+        "nashville",
+        "perpetua",
+        "poprocket",
+        "reyes",
+        "rise",
+        "sierra",
+        "skyline",
+        "slumber",
+        "stinson",
+        "sutro",
+        "toaster",
+        "valencia",
+        "walden",
+        "willow",
+        "xpro2",
+    ]
+    items.extend(
+        FilterPreset(
+            name=f"IG: {name.title()}",
+            params=FilterParams(pilgram_filter=name),
+            category="Instagram",
+        )
+        for name in pilgram_names
+    )
+
+    return items
 
 
 def preset_map() -> Dict[str, FilterPreset]:

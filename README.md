@@ -15,6 +15,7 @@ Simple desktop image color-correction preset tool (PySide6).
 - Load a .cube LUT and use it like a preset
 - Adjust a strength slider (blends original → filtered)
 - Save the filtered image
+- Includes an "Instagram" preset category powered by `pilgram2`
 
 ## Notes
 
