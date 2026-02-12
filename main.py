@@ -13,6 +13,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from cb_color_correct.filters import FilterPreset, presets
 from cb_color_correct.image_ops import FilterParams, process_rgb8_stack
 from cb_color_correct.lut import CubeParseError, load_cube
+from cb_color_correct.curve_editor import CurveEditor
 
 
 def pil_to_rgb8(pil_img: Image.Image) -> np.ndarray:
@@ -430,10 +431,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exposure_slider, self.exposure_value = self._make_slider(-200, 200, 0, suffix=" st")
         self.brightness_slider, self.brightness_value = self._make_slider(-20, 20, 0, suffix="")
         self.contrast_slider, self.contrast_value = self._make_slider(-50, 50, 0, suffix="")
+        self.blacks_slider, self.blacks_value = self._make_slider(-100, 100, 0, suffix="")
+        self.whites_slider, self.whites_value = self._make_slider(-100, 100, 0, suffix="")
 
         tone_form.addRow("Exposure", self._hbox(self.exposure_slider, self.exposure_value))
         tone_form.addRow("Brightness", self._hbox(self.brightness_slider, self.brightness_value))
         tone_form.addRow("Contrast", self._hbox(self.contrast_slider, self.contrast_value))
+        tone_form.addRow("Blacks", self._hbox(self.blacks_slider, self.blacks_value))
+        tone_form.addRow("Whites", self._hbox(self.whites_slider, self.whites_value))
 
         # Color group
         self.color_group = QtWidgets.QGroupBox("Color")
@@ -453,6 +458,79 @@ class MainWindow(QtWidgets.QMainWindow):
         color_form.addRow("Saturation", self._hbox(self.sat_slider, self.sat_value))
         color_form.addRow("Vibrance", self._hbox(self.vib_slider, self.vib_value))
 
+        # WB group
+        self.wb_group = QtWidgets.QGroupBox("WB")
+        self.wb_group.setCheckable(True)
+        self.wb_group.setChecked(False)
+        wb_form = QtWidgets.QFormLayout(self.wb_group)
+        wb_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        wb_form.setContentsMargins(6, 6, 6, 6)
+        wb_form.setHorizontalSpacing(8)
+        wb_form.setVerticalSpacing(4)
+
+        self.temp_slider, self.temp_value = self._make_slider(-100, 100, 0, suffix="")
+        self.tint_slider, self.tint_value = self._make_slider(-100, 100, 0, suffix="")
+        wb_form.addRow("Temp", self._hbox(self.temp_slider, self.temp_value))
+        wb_form.addRow("Tint", self._hbox(self.tint_slider, self.tint_value))
+
+        # Shadows / Highlights group
+        self.sh_group = QtWidgets.QGroupBox("Shadows / Highlights")
+        self.sh_group.setCheckable(True)
+        self.sh_group.setChecked(False)
+        sh_form = QtWidgets.QFormLayout(self.sh_group)
+        sh_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        sh_form.setContentsMargins(6, 6, 6, 6)
+        sh_form.setHorizontalSpacing(8)
+        sh_form.setVerticalSpacing(4)
+
+        self.shadows_slider, self.shadows_value = self._make_slider(-100, 100, 0, suffix="")
+        self.highlights_slider, self.highlights_value = self._make_slider(-100, 100, 0, suffix="")
+        sh_form.addRow("Shadows", self._hbox(self.shadows_slider, self.shadows_value))
+        sh_form.addRow("Highlights", self._hbox(self.highlights_slider, self.highlights_value))
+
+        # Split Tone group
+        self.split_group = QtWidgets.QGroupBox("Split Tone")
+        self.split_group.setCheckable(True)
+        self.split_group.setChecked(False)
+        split_form = QtWidgets.QFormLayout(self.split_group)
+        split_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        split_form.setContentsMargins(6, 6, 6, 6)
+        split_form.setHorizontalSpacing(8)
+        split_form.setVerticalSpacing(4)
+
+        self.split_shadows_btn = QtWidgets.QPushButton(" ")
+        self.split_shadows_btn.setFixedHeight(22)
+        self.split_highlights_btn = QtWidgets.QPushButton(" ")
+        self.split_highlights_btn.setFixedHeight(22)
+
+        self.split_amount_slider, self.split_amount_value = self._make_slider(0, 100, 0, suffix="")
+        self.split_balance_slider, self.split_balance_value = self._make_slider(-100, 100, 0, suffix="")
+
+        split_form.addRow("Shadows", self.split_shadows_btn)
+        split_form.addRow("Highlights", self.split_highlights_btn)
+        split_form.addRow("Amount", self._hbox(self.split_amount_slider, self.split_amount_value))
+        split_form.addRow("Balance", self._hbox(self.split_balance_slider, self.split_balance_value))
+
+        # Effects group
+        self.effects_group = QtWidgets.QGroupBox("Effects")
+        self.effects_group.setCheckable(True)
+        self.effects_group.setChecked(False)
+        fx_form = QtWidgets.QFormLayout(self.effects_group)
+        fx_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        fx_form.setContentsMargins(6, 6, 6, 6)
+        fx_form.setHorizontalSpacing(8)
+        fx_form.setVerticalSpacing(4)
+
+        self.clarity_slider, self.clarity_value = self._make_slider(-100, 100, 0, suffix="")
+        self.dehaze_slider, self.dehaze_value = self._make_slider(-100, 100, 0, suffix="")
+        self.vignette_slider, self.vignette_value = self._make_slider(-100, 100, 0, suffix="")
+        self.vignette_mid_slider, self.vignette_mid_value = self._make_slider(0, 100, 50, suffix="")
+
+        fx_form.addRow("Clarity", self._hbox(self.clarity_slider, self.clarity_value))
+        fx_form.addRow("Dehaze", self._hbox(self.dehaze_slider, self.dehaze_value))
+        fx_form.addRow("Vignette", self._hbox(self.vignette_slider, self.vignette_value))
+        fx_form.addRow("Vig Mid", self._hbox(self.vignette_mid_slider, self.vignette_mid_value))
+
         # Levels group
         self.levels_group = QtWidgets.QGroupBox("Levels")
         self.levels_group.setCheckable(True)
@@ -471,28 +549,102 @@ class MainWindow(QtWidgets.QMainWindow):
         levels_form.addRow("White", self._hbox(self.white_slider, self.white_value))
         levels_form.addRow("Gamma", self._hbox(self.gamma_slider, self.gamma_value))
 
+        # Curves group
+        self.curves_group = QtWidgets.QGroupBox("Curves")
+        self.curves_group.setCheckable(True)
+        self.curves_group.setChecked(False)
+        curves_layout = QtWidgets.QVBoxLayout(self.curves_group)
+        curves_layout.setContentsMargins(6, 6, 6, 6)
+        curves_layout.setSpacing(6)
+
+        channel_row = QtWidgets.QHBoxLayout()
+        channel_row.setContentsMargins(0, 0, 0, 0)
+        channel_row.setSpacing(8)
+        channel_row.addWidget(QtWidgets.QLabel("Channel"))
+        self.curve_channel = QtWidgets.QComboBox()
+        self.curve_channel.addItems(["Master", "Red", "Green", "Blue"])
+        self.curve_channel.setCurrentIndex(0)
+        channel_row.addWidget(self.curve_channel, 1)
+        curves_layout.addLayout(channel_row)
+
+        self.curve_editor = CurveEditor()
+        curves_layout.addWidget(self.curve_editor)
+
         self.reset_adjust_btn = QtWidgets.QPushButton("Reset Adjustments")
 
         self._adjust_layout.addWidget(self.tone_group)
         self._adjust_layout.addWidget(self.color_group)
+        self._adjust_layout.addWidget(self.wb_group)
+        self._adjust_layout.addWidget(self.sh_group)
+        self._adjust_layout.addWidget(self.split_group)
+        self._adjust_layout.addWidget(self.effects_group)
         self._adjust_layout.addWidget(self.levels_group)
+        self._adjust_layout.addWidget(self.curves_group)
         self._adjust_layout.addWidget(self.reset_adjust_btn)
         self._adjust_layout.addStretch(1)
 
         # Signals
         self.reset_adjust_btn.clicked.connect(self._on_reset_adjustments)
 
+        self.tone_group.toggled.connect(self._on_adjust_change)
+        self.color_group.toggled.connect(self._on_adjust_change)
+        self.wb_group.toggled.connect(self._on_adjust_change)
+        self.sh_group.toggled.connect(self._on_adjust_change)
+        self.split_group.toggled.connect(self._on_adjust_change)
+        self.effects_group.toggled.connect(self._on_adjust_change)
+        self.levels_group.toggled.connect(self._on_adjust_change)
+
         self.exposure_slider.valueChanged.connect(self._on_adjust_change)
         self.brightness_slider.valueChanged.connect(self._on_adjust_change)
         self.contrast_slider.valueChanged.connect(self._on_adjust_change)
+        self.blacks_slider.valueChanged.connect(self._on_adjust_change)
+        self.whites_slider.valueChanged.connect(self._on_adjust_change)
         self.hue_slider.valueChanged.connect(self._on_adjust_change)
         self.sat_slider.valueChanged.connect(self._on_adjust_change)
         self.vib_slider.valueChanged.connect(self._on_adjust_change)
+        self.temp_slider.valueChanged.connect(self._on_adjust_change)
+        self.tint_slider.valueChanged.connect(self._on_adjust_change)
+        self.shadows_slider.valueChanged.connect(self._on_adjust_change)
+        self.highlights_slider.valueChanged.connect(self._on_adjust_change)
+        self.split_amount_slider.valueChanged.connect(self._on_adjust_change)
+        self.split_balance_slider.valueChanged.connect(self._on_adjust_change)
+        self.clarity_slider.valueChanged.connect(self._on_adjust_change)
+        self.dehaze_slider.valueChanged.connect(self._on_adjust_change)
+        self.vignette_slider.valueChanged.connect(self._on_adjust_change)
+        self.vignette_mid_slider.valueChanged.connect(self._on_adjust_change)
         self.black_slider.valueChanged.connect(self._on_adjust_change)
         self.white_slider.valueChanged.connect(self._on_adjust_change)
         self.gamma_slider.valueChanged.connect(self._on_adjust_change)
+        self.curves_group.toggled.connect(self._on_adjust_change)
+        self.curve_editor.pointsChanged.connect(self._on_curve_changed)
+        self.curve_channel.currentIndexChanged.connect(self._on_curve_channel_changed)
+
+        self.split_shadows_btn.clicked.connect(self._pick_split_shadows)
+        self.split_highlights_btn.clicked.connect(self._pick_split_highlights)
 
         self._sync_adjustment_widgets_from_state()
+
+    def _on_curve_changed(self, points: list) -> None:
+        # Points are list[(x,y)] in 0..1.
+        if not getattr(self, "curves_group", None) or not self.curves_group.isChecked():
+            return
+        pts = tuple((float(x), float(y)) for x, y in points)
+        channel = self.curve_channel.currentText()
+        if channel == "Master":
+            self._adjust_params = replace(self._adjust_params, curve_points=pts)
+        elif channel == "Red":
+            self._adjust_params = replace(self._adjust_params, curve_points_r=pts)
+        elif channel == "Green":
+            self._adjust_params = replace(self._adjust_params, curve_points_g=pts)
+        elif channel == "Blue":
+            self._adjust_params = replace(self._adjust_params, curve_points_b=pts)
+        self._schedule_apply()
+
+    def _on_curve_channel_changed(self) -> None:
+        # Load the selected channel's curve into the editor.
+        if not getattr(self, "curve_editor", None):
+            return
+        self._sync_curve_editor_from_state()
 
     def _on_reset_adjustments(self) -> None:
         self._adjust_params = FilterParams()
@@ -504,9 +656,24 @@ class MainWindow(QtWidgets.QMainWindow):
         exposure = self.exposure_slider.value() / 100.0
         brightness = self.brightness_slider.value() / 100.0
         contrast = self.contrast_slider.value() / 100.0
+        blacks = self.blacks_slider.value() / 100.0
+        whites = self.whites_slider.value() / 100.0
         hue = float(self.hue_slider.value())
         sat = self.sat_slider.value() / 100.0
         vib = self.vib_slider.value() / 100.0
+
+        temperature = self.temp_slider.value() / 100.0
+        tint = self.tint_slider.value() / 100.0
+        shadows = self.shadows_slider.value() / 100.0
+        highlights = self.highlights_slider.value() / 100.0
+
+        split_amount = self.split_amount_slider.value() / 100.0
+        split_balance = self.split_balance_slider.value() / 100.0
+
+        clarity = self.clarity_slider.value() / 100.0
+        dehaze = self.dehaze_slider.value() / 100.0
+        vignette = self.vignette_slider.value() / 100.0
+        vignette_mid = self.vignette_mid_slider.value() / 100.0
 
         black = self.black_slider.value() / 100.0
         white = self.white_slider.value() / 100.0
@@ -516,9 +683,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exposure_value.setText(f"{exposure:.2f} st")
         self.brightness_value.setText(f"{brightness:.2f}")
         self.contrast_value.setText(f"{contrast:.2f}")
+        self.blacks_value.setText(f"{blacks:.2f}")
+        self.whites_value.setText(f"{whites:.2f}")
         self.hue_value.setText(f"{int(hue)}°")
         self.sat_value.setText(f"{sat:.2f}")
         self.vib_value.setText(f"{vib:.2f}")
+        self.temp_value.setText(f"{temperature:.2f}")
+        self.tint_value.setText(f"{tint:.2f}")
+        self.shadows_value.setText(f"{shadows:.2f}")
+        self.highlights_value.setText(f"{highlights:.2f}")
+        self.split_amount_value.setText(f"{split_amount:.2f}")
+        self.split_balance_value.setText(f"{split_balance:.2f}")
+        self.clarity_value.setText(f"{clarity:.2f}")
+        self.dehaze_value.setText(f"{dehaze:.2f}")
+        self.vignette_value.setText(f"{vignette:.2f}")
+        self.vignette_mid_value.setText(f"{vignette_mid:.2f}")
         self.black_value.setText(f"{black:.2f}")
         self.white_value.setText(f"{white:.2f}")
         self.gamma_value.setText(f"{gamma:.2f}")
@@ -528,26 +707,75 @@ class MainWindow(QtWidgets.QMainWindow):
             exposure = 0.0
             brightness = 0.0
             contrast = 0.0
+            blacks = 0.0
+            whites = 0.0
         if not self.color_group.isChecked():
             hue = 0.0
             sat = 0.0
             vib = 0.0
+        if not self.wb_group.isChecked():
+            temperature = 0.0
+            tint = 0.0
+        if not self.sh_group.isChecked():
+            shadows = 0.0
+            highlights = 0.0
+        if not self.split_group.isChecked():
+            split_amount = 0.0
+            split_balance = 0.0
+        if not self.effects_group.isChecked():
+            clarity = 0.0
+            dehaze = 0.0
+            vignette = 0.0
+            vignette_mid = 0.5
         if not self.levels_group.isChecked():
             black = 0.0
             white = 1.0
             gamma = 1.0
+
+        curve_points = None
+        curve_r = None
+        curve_g = None
+        curve_b = None
+        if getattr(self, "curves_group", None) and self.curves_group.isChecked():
+            # Keep existing stored curves; the editor writes the selected channel via _on_curve_changed.
+            curve_points = self._adjust_params.curve_points
+            curve_r = self._adjust_params.curve_points_r
+            curve_g = self._adjust_params.curve_points_g
+            curve_b = self._adjust_params.curve_points_b
+        else:
+            # Disabled -> clear curves
+            curve_points = None
+            curve_r = None
+            curve_g = None
+            curve_b = None
 
         self._adjust_params = replace(
             self._adjust_params,
             exposure=exposure,
             brightness=brightness,
             contrast=contrast,
+            blacks=blacks,
+            whites=whites,
             hue_degrees=hue,
             saturation=sat,
             vibrance=vib,
+            temperature=temperature,
+            tint=tint,
+            shadows=shadows,
+            highlights=highlights,
+            split_balance=split_balance,
+            split_amount=split_amount,
+            clarity=clarity,
+            dehaze=dehaze,
+            vignette=vignette,
+            vignette_midpoint=vignette_mid,
             levels_black=black,
             levels_white=white,
             levels_gamma=gamma,
+            curve_points=curve_points,
+            curve_points_r=curve_r,
+            curve_points_g=curve_g,
+            curve_points_b=curve_b,
         )
         self._schedule_apply()
 
@@ -557,9 +785,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.exposure_slider,
             self.brightness_slider,
             self.contrast_slider,
+            self.blacks_slider,
+            self.whites_slider,
             self.hue_slider,
             self.sat_slider,
             self.vib_slider,
+            self.temp_slider,
+            self.tint_slider,
+            self.shadows_slider,
+            self.highlights_slider,
+            self.split_amount_slider,
+            self.split_balance_slider,
+            self.clarity_slider,
+            self.dehaze_slider,
+            self.vignette_slider,
+            self.vignette_mid_slider,
             self.black_slider,
             self.white_slider,
             self.gamma_slider,
@@ -570,18 +810,120 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exposure_slider.setValue(int(round(self._adjust_params.exposure * 100.0)))
         self.brightness_slider.setValue(int(round(self._adjust_params.brightness * 100.0)))
         self.contrast_slider.setValue(int(round(self._adjust_params.contrast * 100.0)))
+        self.blacks_slider.setValue(int(round(self._adjust_params.blacks * 100.0)))
+        self.whites_slider.setValue(int(round(self._adjust_params.whites * 100.0)))
         self.hue_slider.setValue(int(round(self._adjust_params.hue_degrees)))
         self.sat_slider.setValue(int(round(self._adjust_params.saturation * 100.0)))
         self.vib_slider.setValue(int(round(self._adjust_params.vibrance * 100.0)))
+
+        self.temp_slider.setValue(int(round(self._adjust_params.temperature * 100.0)))
+        self.tint_slider.setValue(int(round(self._adjust_params.tint * 100.0)))
+        self.shadows_slider.setValue(int(round(self._adjust_params.shadows * 100.0)))
+        self.highlights_slider.setValue(int(round(self._adjust_params.highlights * 100.0)))
+
+        self.split_amount_slider.setValue(int(round(self._adjust_params.split_amount * 100.0)))
+        self.split_balance_slider.setValue(int(round(self._adjust_params.split_balance * 100.0)))
+
+        self.clarity_slider.setValue(int(round(self._adjust_params.clarity * 100.0)))
+        self.dehaze_slider.setValue(int(round(self._adjust_params.dehaze * 100.0)))
+        self.vignette_slider.setValue(int(round(self._adjust_params.vignette * 100.0)))
+        self.vignette_mid_slider.setValue(int(round(self._adjust_params.vignette_midpoint * 100.0)))
 
         self.black_slider.setValue(int(round(self._adjust_params.levels_black * 100.0)))
         self.white_slider.setValue(int(round(self._adjust_params.levels_white * 100.0)))
         self.gamma_slider.setValue(int(round(self._adjust_params.levels_gamma * 100.0)))
 
+        # Enable/disable optional groups based on state (important for preset load).
+        self.wb_group.setChecked(bool(self._adjust_params.temperature or self._adjust_params.tint))
+        self.sh_group.setChecked(bool(self._adjust_params.shadows or self._adjust_params.highlights))
+        self.split_group.setChecked(bool(self._adjust_params.split_amount))
+        self.effects_group.setChecked(
+            bool(self._adjust_params.clarity or self._adjust_params.dehaze or self._adjust_params.vignette)
+        )
+
+        self._sync_split_buttons_from_state()
+
+        # Curves
+        if getattr(self, "curves_group", None):
+            has_any_curve = (
+                self._adjust_params.curve_points is not None
+                or self._adjust_params.curve_points_r is not None
+                or self._adjust_params.curve_points_g is not None
+                or self._adjust_params.curve_points_b is not None
+            )
+            self.curves_group.setChecked(bool(has_any_curve))
+            self._sync_curve_editor_from_state()
+
         for w in widgets:
             w.blockSignals(False)
 
         self._on_adjust_change()
+
+    def _sync_curve_editor_from_state(self) -> None:
+        if not getattr(self, "curve_editor", None):
+            return
+        channel = self.curve_channel.currentText() if getattr(self, "curve_channel", None) else "Master"
+        pts = None
+        if channel == "Master":
+            pts = self._adjust_params.curve_points
+        elif channel == "Red":
+            pts = self._adjust_params.curve_points_r
+        elif channel == "Green":
+            pts = self._adjust_params.curve_points_g
+        elif channel == "Blue":
+            pts = self._adjust_params.curve_points_b
+
+        if pts is None:
+            self.curve_editor.set_identity(emit=False)
+        else:
+            self.curve_editor.set_points(pts, emit=False)
+
+    def _sync_split_buttons_from_state(self) -> None:
+        if not getattr(self, "split_shadows_btn", None):
+            return
+        sh = self._split_shadows_color()
+        hi = self._split_highlights_color()
+        self._set_color_button(self.split_shadows_btn, sh)
+        self._set_color_button(self.split_highlights_btn, hi)
+
+    def _set_color_button(self, btn: QtWidgets.QPushButton, color: QtGui.QColor) -> None:
+        btn.setStyleSheet(
+            "QPushButton {"
+            f"background-color: {color.name()};"
+            "border: 1px solid #3a3a3a;"
+            "border-radius: 3px;"
+            "}"
+        )
+
+    def _split_shadows_color(self) -> QtGui.QColor:
+        r, g, b = self._adjust_params.split_shadows
+        return QtGui.QColor.fromRgbF(float(r), float(g), float(b))
+
+    def _split_highlights_color(self) -> QtGui.QColor:
+        r, g, b = self._adjust_params.split_highlights
+        return QtGui.QColor.fromRgbF(float(r), float(g), float(b))
+
+    def _pick_split_shadows(self) -> None:
+        c = QtWidgets.QColorDialog.getColor(self._split_shadows_color(), self, "Split Tone - Shadows")
+        if not c.isValid():
+            return
+        rgb = (c.redF(), c.greenF(), c.blueF())
+        self._adjust_params = replace(self._adjust_params, split_shadows=rgb)
+        self._set_color_button(self.split_shadows_btn, c)
+        if not self.split_group.isChecked():
+            self.split_group.setChecked(True)
+        self._schedule_apply()
+
+    def _pick_split_highlights(self) -> None:
+        c = QtWidgets.QColorDialog.getColor(self._split_highlights_color(), self, "Split Tone - Highlights")
+        if not c.isValid():
+            return
+        rgb = (c.redF(), c.greenF(), c.blueF())
+        self._adjust_params = replace(self._adjust_params, split_highlights=rgb)
+        self._set_color_button(self.split_highlights_btn, c)
+        if not self.split_group.isChecked():
+            self.split_group.setChecked(True)
+        self._schedule_apply()
 
     def _make_slider(self, min_v: int, max_v: int, value: int, suffix: str = "") -> tuple[QtWidgets.QSlider, QtWidgets.QLabel]:
         s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
@@ -619,13 +961,26 @@ class MainWindow(QtWidgets.QMainWindow):
             "exposure": p.exposure,
             "brightness": p.brightness,
             "contrast": p.contrast,
+            "blacks": p.blacks,
+            "whites": p.whites,
             "saturation": p.saturation,
             "vibrance": p.vibrance,
             "hue_degrees": p.hue_degrees,
+            "temperature": p.temperature,
+            "tint": p.tint,
+            "shadows": p.shadows,
+            "highlights": p.highlights,
+            "clarity": p.clarity,
+            "dehaze": p.dehaze,
+            "vignette": p.vignette,
+            "vignette_midpoint": p.vignette_midpoint,
             "levels_black": p.levels_black,
             "levels_white": p.levels_white,
             "levels_gamma": p.levels_gamma,
             "curve_points": list(p.curve_points) if p.curve_points is not None else None,
+            "curve_points_r": list(p.curve_points_r) if p.curve_points_r is not None else None,
+            "curve_points_g": list(p.curve_points_g) if p.curve_points_g is not None else None,
+            "curve_points_b": list(p.curve_points_b) if p.curve_points_b is not None else None,
             "channel_mul": list(p.channel_mul),
             "split_shadows": list(p.split_shadows),
             "split_highlights": list(p.split_highlights),
@@ -638,17 +993,40 @@ class MainWindow(QtWidgets.QMainWindow):
         curve_points = None
         if curve is not None:
             curve_points = tuple((float(x), float(y)) for x, y in curve)
+
+        def read_curve(key: str) -> tuple[tuple[float, float], ...] | None:
+            v = d.get(key)
+            if v is None:
+                return None
+            return tuple((float(x), float(y)) for x, y in v)
+
+        curve_r = read_curve("curve_points_r")
+        curve_g = read_curve("curve_points_g")
+        curve_b = read_curve("curve_points_b")
         return FilterParams(
             exposure=float(d.get("exposure", 0.0)),
             brightness=float(d.get("brightness", 0.0)),
             contrast=float(d.get("contrast", 0.0)),
+            blacks=float(d.get("blacks", 0.0)),
+            whites=float(d.get("whites", 0.0)),
             saturation=float(d.get("saturation", 0.0)),
             vibrance=float(d.get("vibrance", 0.0)),
             hue_degrees=float(d.get("hue_degrees", 0.0)),
+            temperature=float(d.get("temperature", 0.0)),
+            tint=float(d.get("tint", 0.0)),
+            shadows=float(d.get("shadows", 0.0)),
+            highlights=float(d.get("highlights", 0.0)),
+            clarity=float(d.get("clarity", 0.0)),
+            dehaze=float(d.get("dehaze", 0.0)),
+            vignette=float(d.get("vignette", 0.0)),
+            vignette_midpoint=float(d.get("vignette_midpoint", 0.5)),
             levels_black=float(d.get("levels_black", 0.0)),
             levels_white=float(d.get("levels_white", 1.0)),
             levels_gamma=float(d.get("levels_gamma", 1.0)),
             curve_points=curve_points,
+            curve_points_r=curve_r,
+            curve_points_g=curve_g,
+            curve_points_b=curve_b,
             channel_mul=tuple(d.get("channel_mul", [1.0, 1.0, 1.0])),
             split_shadows=tuple(d.get("split_shadows", [0.0, 0.0, 0.0])),
             split_highlights=tuple(d.get("split_highlights", [0.0, 0.0, 0.0])),
@@ -663,13 +1041,26 @@ class MainWindow(QtWidgets.QMainWindow):
             exposure=base.exposure + adjust.exposure,
             brightness=base.brightness + adjust.brightness,
             contrast=base.contrast + adjust.contrast,
+            blacks=base.blacks + adjust.blacks,
+            whites=base.whites + adjust.whites,
             saturation=base.saturation + adjust.saturation,
             vibrance=base.vibrance + adjust.vibrance,
             hue_degrees=base.hue_degrees + adjust.hue_degrees,
+            temperature=base.temperature + adjust.temperature,
+            tint=base.tint + adjust.tint,
+            shadows=base.shadows + adjust.shadows,
+            highlights=base.highlights + adjust.highlights,
+            clarity=base.clarity + adjust.clarity,
+            dehaze=base.dehaze + adjust.dehaze,
+            vignette=base.vignette + adjust.vignette,
+            vignette_midpoint=adjust.vignette_midpoint if adjust.vignette_midpoint != 0.5 else base.vignette_midpoint,
             levels_black=max(0.0, base.levels_black + adjust.levels_black),
             levels_white=min(1.0, base.levels_white * (adjust.levels_white if adjust.levels_white != 1.0 else 1.0)),
             levels_gamma=base.levels_gamma * (adjust.levels_gamma if adjust.levels_gamma != 1.0 else 1.0),
             curve_points=adjust.curve_points or base.curve_points,
+            curve_points_r=adjust.curve_points_r or base.curve_points_r,
+            curve_points_g=adjust.curve_points_g or base.curve_points_g,
+            curve_points_b=adjust.curve_points_b or base.curve_points_b,
             channel_mul=(
                 base.channel_mul[0] * adjust.channel_mul[0],
                 base.channel_mul[1] * adjust.channel_mul[1],

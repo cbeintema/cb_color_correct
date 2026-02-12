@@ -4,23 +4,17 @@ This file tracks larger follow-ups for CB Color Correct.
 
 ## In progress / next
 
-### Curves editor widget
+### Per-channel curves (optional)
 
-Goal: expose curves as a real widget (not just preset-defined points).
-
-- Implement a simple curve editor (QGraphicsView) with:
-  - 4–6 draggable control points in 0..1 space
-  - clamped endpoints at (0,0) and (1,1)
-  - optional reset + "S-curve" presets
-- Convert control points to `FilterParams.curve_points` and apply live.
-- Optional: per-channel curves later (RGB separate). Start with one master curve.
+- Implemented Master + per-channel (R/G/B) curves via a Channel selector in the Curves panel.
+- Optional next: add "link" mode (edit Master and propagate to RGB) and/or show all curves overlayed.
 
 ### More color tools
 
 - HSL: currently we have Hue + Saturation and "Brightness" as a rough luminance control.
 - Consider adding:
-  - highlights/shadows (simple luma masks)
-  - temperature/tint (approx via channel multipliers)
+  - split-tone controls (expose shadows/highlights color + amount)
+  - optional: clarity/dehaze approximation (mid-tone contrast)
 
 ### Preset save/load improvements
 
@@ -45,3 +39,7 @@ Potential improvements:
 - Basic preset browser with categories
 - LUT load (.cube 1D/3D)
 - Adjustment sliders: Exposure/Brightness/Contrast/Hue/Saturation/Vibrance + Levels
+- Curves editor widget (master curve, draggable points + Reset + S-Curve)
+- Temperature / Tint (WB), Shadows / Highlights, Blacks / Whites sliders
+- Split Tone controls (shadows/highlights colors + amount/balance)
+- Effects: Clarity (midtone contrast), Dehaze (approx), Vignette

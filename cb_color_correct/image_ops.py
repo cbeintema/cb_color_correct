@@ -98,6 +98,31 @@ def apply_curve(rgb01: ArrayF, points: Sequence[tuple[float, float]]) -> ArrayF:
     return lut[idx]
 
 
+def apply_curve_rgb(
+    rgb01: ArrayF,
+    points_r: Sequence[tuple[float, float]] | None,
+    points_g: Sequence[tuple[float, float]] | None,
+    points_b: Sequence[tuple[float, float]] | None,
+) -> ArrayF:
+    if points_r is None and points_g is None and points_b is None:
+        return rgb01
+
+    idx = np.clip((rgb01 * 255.0 + 0.5).astype(np.int32), 0, 255)
+    out = rgb01.copy()
+
+    if points_r is not None:
+        lut_r = _lut_from_points(points_r)
+        out[..., 0] = lut_r[idx[..., 0]]
+    if points_g is not None:
+        lut_g = _lut_from_points(points_g)
+        out[..., 1] = lut_g[idx[..., 1]]
+    if points_b is not None:
+        lut_b = _lut_from_points(points_b)
+        out[..., 2] = lut_b[idx[..., 2]]
+
+    return out
+
+
 def apply_saturation(rgb01: ArrayF, saturation: float) -> ArrayF:
     # saturation in [-1, 1]
     s = float(saturation)
@@ -147,6 +172,115 @@ def apply_hue_shift(rgb01: ArrayF, degrees: float) -> ArrayF:
     return out
 
 
+def apply_temperature_tint(rgb01: ArrayF, temperature: float, tint: float) -> ArrayF:
+    # Both inputs in [-1, 1].
+    # Temperature: warm (+) shifts toward red, cool (-) toward blue.
+    # Tint: magenta (+) vs green (-).
+    t = float(temperature)
+    ti = float(tint)
+    if t == 0.0 and ti == 0.0:
+        return rgb01
+
+    # Keep it subtle and pleasant: multipliers roughly in ~[0.85, 1.15] at extremes.
+    r = 1.0 + 0.18 * t + 0.08 * ti
+    g = 1.0 - 0.12 * ti
+    b = 1.0 - 0.18 * t + 0.08 * ti
+    return apply_channel_multipliers(rgb01, r=r, g=g, b=b)
+
+
+def apply_shadows_highlights(
+    rgb01: ArrayF,
+    shadows: float,
+    highlights: float,
+    balance: float = 0.0,
+) -> ArrayF:
+    # shadows/highlights in [-1, 1], balance in [-1, 1]
+    sh = float(shadows)
+    hi = float(highlights)
+    if sh == 0.0 and hi == 0.0:
+        return rgb01
+
+    l = luminance(rgb01)
+    mid = 0.5 + float(balance) * 0.15
+    # Masks
+    shadows_mask = np.clip((mid - l) * 2.2, 0.0, 1.0)
+    highlights_mask = np.clip((l - mid) * 2.2, 0.0, 1.0)
+
+    # Amount scaling: keep within a reasonable range
+    sh_amt = sh * 0.35
+    hi_amt = hi * 0.35
+    out = rgb01 + shadows_mask[..., None] * sh_amt + highlights_mask[..., None] * hi_amt
+    return out
+
+
+def apply_blacks_whites(rgb01: ArrayF, blacks: float, whites: float) -> ArrayF:
+    # blacks/whites in [-1, 1]
+    b = float(blacks)
+    w = float(whites)
+    if b == 0.0 and w == 0.0:
+        return rgb01
+
+    l = luminance(rgb01)
+    blacks_mask = np.clip((0.35 - l) * 3.0, 0.0, 1.0)
+    whites_mask = np.clip((l - 0.65) * 3.0, 0.0, 1.0)
+
+    b_amt = b * 0.30
+    w_amt = w * 0.30
+    out = rgb01 + blacks_mask[..., None] * b_amt + whites_mask[..., None] * w_amt
+    return out
+
+
+def _smoothstep(edge0: float, edge1: float, x: ArrayF) -> ArrayF:
+    t = np.clip((x - edge0) / max(edge1 - edge0, 1e-6), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def apply_midtone_contrast(rgb01: ArrayF, amount: float) -> ArrayF:
+    a = float(amount)
+    if a == 0.0:
+        return rgb01
+    l = luminance(rgb01)
+    # Midtone mask peaks around 0.5 and falls off toward shadows/highlights.
+    mid = 1.0 - np.clip(np.abs(l - 0.5) * 2.2, 0.0, 1.0)
+    factor = 1.0 + a * 0.9 * mid
+    return (rgb01 - 0.5) * factor[..., None] + 0.5
+
+
+def apply_dehaze(rgb01: ArrayF, amount: float) -> ArrayF:
+    a = float(amount)
+    if a == 0.0:
+        return rgb01
+    out = rgb01
+    out = apply_midtone_contrast(out, a * 0.65)
+    out = apply_contrast(out, a * 0.20)
+    out = apply_blacks_whites(out, blacks=a * 0.25, whites=a * 0.10)
+    out = apply_vibrance(out, a * 0.20)
+    return out
+
+
+def apply_vignette(rgb01: ArrayF, amount: float, midpoint: float = 0.5) -> ArrayF:
+    a = float(amount)
+    if a == 0.0:
+        return rgb01
+
+    h, w = rgb01.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    x = (xx / max(w - 1, 1)) * 2.0 - 1.0
+    y = (yy / max(h - 1, 1)) * 2.0 - 1.0
+
+    # Aspect-correct radius.
+    aspect = w / max(h, 1)
+    x = x * aspect
+    r = np.sqrt(x * x + y * y)
+    r = r / np.sqrt(aspect * aspect + 1.0)
+
+    m = float(np.clip(midpoint, 0.0, 1.0))
+    v = _smoothstep(m, 1.0, r)
+    # a>0 darkens edges, a<0 lightens edges.
+    factor = 1.0 - a * v
+    return rgb01 * factor[..., None]
+
+
 def apply_split_tone(
     rgb01: ArrayF,
     shadows_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0),
@@ -178,13 +312,26 @@ class FilterParams:
     exposure: float = 0.0
     brightness: float = 0.0
     contrast: float = 0.0
+    blacks: float = 0.0
+    whites: float = 0.0
     saturation: float = 0.0
     vibrance: float = 0.0
     hue_degrees: float = 0.0
+    temperature: float = 0.0
+    tint: float = 0.0
+    shadows: float = 0.0
+    highlights: float = 0.0
+    clarity: float = 0.0
+    dehaze: float = 0.0
+    vignette: float = 0.0
+    vignette_midpoint: float = 0.5
     levels_black: float = 0.0
     levels_white: float = 1.0
     levels_gamma: float = 1.0
     curve_points: tuple[tuple[float, float], ...] | None = None
+    curve_points_r: tuple[tuple[float, float], ...] | None = None
+    curve_points_g: tuple[tuple[float, float], ...] | None = None
+    curve_points_b: tuple[tuple[float, float], ...] | None = None
     channel_mul: tuple[float, float, float] = (1.0, 1.0, 1.0)
     split_shadows: tuple[float, float, float] = (0.0, 0.0, 0.0)
     split_highlights: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -201,6 +348,16 @@ def apply_params(rgb01: ArrayF, params: FilterParams) -> ArrayF:
         out = apply_brightness(out, params.brightness)
     if params.contrast:
         out = apply_contrast(out, params.contrast)
+    if params.blacks or params.whites:
+        out = apply_blacks_whites(out, params.blacks, params.whites)
+    if params.temperature or params.tint:
+        out = apply_temperature_tint(out, params.temperature, params.tint)
+    if params.shadows or params.highlights:
+        out = apply_shadows_highlights(out, params.shadows, params.highlights)
+    if params.clarity:
+        out = apply_midtone_contrast(out, params.clarity)
+    if params.dehaze:
+        out = apply_dehaze(out, params.dehaze)
     if params.hue_degrees:
         out = apply_hue_shift(out, params.hue_degrees)
     if params.saturation:
@@ -213,6 +370,8 @@ def apply_params(rgb01: ArrayF, params: FilterParams) -> ArrayF:
         out = apply_levels(out, params.levels_black, params.levels_white, params.levels_gamma)
     if params.curve_points is not None:
         out = apply_curve(out, params.curve_points)
+    if params.curve_points_r is not None or params.curve_points_g is not None or params.curve_points_b is not None:
+        out = apply_curve_rgb(out, params.curve_points_r, params.curve_points_g, params.curve_points_b)
     if params.split_amount:
         out = apply_split_tone(
             out,
@@ -223,6 +382,8 @@ def apply_params(rgb01: ArrayF, params: FilterParams) -> ArrayF:
         )
     if params.lut is not None:
         out = apply_lut(out, params.lut)
+    if params.vignette:
+        out = apply_vignette(out, params.vignette, params.vignette_midpoint)
     return np.clip(out, 0.0, 1.0)
 
 
