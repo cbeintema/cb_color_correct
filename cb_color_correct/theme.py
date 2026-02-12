@@ -146,5 +146,20 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
 
         /* Dialogs */
         QMessageBox { background: #181818; }
+
+        /* Progress */
+        QProgressBar {
+            background: #121212;
+            border: 1px solid #343434;
+            border-radius: 4px;
+            text-align: center;
+            padding: 1px;
+            color: #cfcfcf;
+            min-height: 18px;
+        }
+        QProgressBar::chunk {
+            background-color: #4e90d7;
+            border-radius: 3px;
+        }
         """
     )

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from dataclasses import replace
 import json
 import traceback
+from typing import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +47,59 @@ class _RenderTask(QtCore.QRunnable):
             self.signals.finished.emit(self.generation, rgb8)
         except Exception:
             self.signals.failed.emit(self.generation, traceback.format_exc())
+
+
+class _BatchSignals(QtCore.QObject):
+    progress = QtCore.Signal(int, int, str)  # done, total, filename
+    finished = QtCore.Signal(int, int)  # ok, failed
+    failed = QtCore.Signal(str)  # fatal error
+
+
+class _BatchTask(QtCore.QRunnable):
+    def __init__(
+        self,
+        files: list[Path],
+        output_dir: Path,
+        base_params: FilterParams,
+        adjust_params: FilterParams,
+        strength: float,
+    ) -> None:
+        super().__init__()
+        self.files = files
+        self.output_dir = output_dir
+        self.base_params = base_params
+        self.adjust_params = adjust_params
+        self.strength = strength
+        self.signals = _BatchSignals()
+
+    def run(self) -> None:
+        try:
+            from PIL import Image
+
+            ok = 0
+            failed = 0
+            total = len(self.files)
+
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+
+            for i, path in enumerate(self.files, start=1):
+                try:
+                    pil_img = Image.open(path)
+                    rgb8 = pil_to_rgb8(pil_img)
+                    out = process_rgb8_stack(rgb8, [self.base_params, self.adjust_params], self.strength)
+
+                    out_name = path.stem + "_filtered" + path.suffix
+                    out_path = self.output_dir / out_name
+                    Image.fromarray(out, mode="RGB").save(out_path)
+                    ok += 1
+                except Exception:
+                    failed += 1
+
+                self.signals.progress.emit(i, total, path.name)
+
+            self.signals.finished.emit(ok, failed)
+        except Exception:
+            self.signals.failed.emit(traceback.format_exc())
 
 
 def pil_to_rgb8(pil_img: Image.Image) -> np.ndarray:
@@ -144,6 +198,60 @@ class MainWindow(QtWidgets.QMainWindow):
         presets_dir_layout.addWidget(self.user_presets_browse_btn)
         left_layout.addWidget(presets_dir_row)
 
+        # Batch panel (collapsed by default)
+        self.batch_group = QtWidgets.QGroupBox("Batch")
+        self.batch_group.setCheckable(True)
+        self.batch_group.setChecked(False)
+        batch_layout = QtWidgets.QVBoxLayout(self.batch_group)
+        batch_layout.setContentsMargins(6, 6, 6, 6)
+        batch_layout.setSpacing(6)
+
+        self.batch_content = QtWidgets.QWidget()
+        bc = QtWidgets.QVBoxLayout(self.batch_content)
+        bc.setContentsMargins(0, 0, 0, 0)
+        bc.setSpacing(6)
+
+        self.batch_input_dir = str(self._settings.value("batchInputDir", ""))
+        self.batch_output_dir = str(self._settings.value("batchOutputDir", ""))
+
+        in_row = QtWidgets.QWidget()
+        in_lay = QtWidgets.QHBoxLayout(in_row)
+        in_lay.setContentsMargins(0, 0, 0, 0)
+        in_lay.setSpacing(6)
+        self.batch_in_edit = QtWidgets.QLineEdit(self.batch_input_dir)
+        self.batch_in_edit.setPlaceholderText("Batch input folder")
+        self.batch_in_browse = QtWidgets.QToolButton()
+        self.batch_in_browse.setText("Browse")
+        in_lay.addWidget(self.batch_in_edit, 1)
+        in_lay.addWidget(self.batch_in_browse)
+
+        out_row = QtWidgets.QWidget()
+        out_lay = QtWidgets.QHBoxLayout(out_row)
+        out_lay.setContentsMargins(0, 0, 0, 0)
+        out_lay.setSpacing(6)
+        self.batch_out_edit = QtWidgets.QLineEdit(self.batch_output_dir)
+        self.batch_out_edit.setPlaceholderText("Batch output folder")
+        self.batch_out_browse = QtWidgets.QToolButton()
+        self.batch_out_browse.setText("Browse")
+        out_lay.addWidget(self.batch_out_edit, 1)
+        out_lay.addWidget(self.batch_out_browse)
+
+        self.batch_run_btn = QtWidgets.QPushButton("Run Batch")
+        self.batch_progress = QtWidgets.QProgressBar()
+        self.batch_progress.setRange(0, 100)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setTextVisible(True)
+        self.batch_progress.setFormat("Idle")
+
+        bc.addWidget(in_row)
+        bc.addWidget(out_row)
+        bc.addWidget(self.batch_run_btn)
+        bc.addWidget(self.batch_progress)
+
+        batch_layout.addWidget(self.batch_content)
+        left_layout.addWidget(self.batch_group)
+        self.batch_content.setVisible(False)
+
         self.preset_tree = QtWidgets.QTreeWidget()
         self.preset_tree.setMinimumWidth(260)
         self.preset_tree.setHeaderHidden(True)
@@ -236,10 +344,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.user_presets_browse_btn.clicked.connect(self._on_browse_user_presets_dir)
         self.user_presets_edit.editingFinished.connect(self._on_user_presets_dir_edited)
 
+        self.batch_group.toggled.connect(self.batch_content.setVisible)
+        self.batch_in_browse.clicked.connect(self._on_browse_batch_input)
+        self.batch_out_browse.clicked.connect(self._on_browse_batch_output)
+        self.batch_in_edit.editingFinished.connect(self._on_batch_paths_edited)
+        self.batch_out_edit.editingFinished.connect(self._on_batch_paths_edited)
+        self.batch_run_btn.clicked.connect(self._on_run_batch)
+
         self._apply_current()
 
         # Load user presets from configured folder on startup.
         self._reload_user_presets_from_folder()
+
+        self._batch_running = False
 
     def _on_load(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -439,6 +556,86 @@ class MainWindow(QtWidgets.QMainWindow):
             combined = self._filterparams_from_dict(payload.get("params") or payload)
 
         return FilterPreset(name=name, params=combined, category="User", source_path=str(path))
+
+    def _on_browse_batch_input(self) -> None:
+        start = self.batch_in_edit.text().strip() or str(Path.home())
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Batch Input Folder", start)
+        if not folder:
+            return
+        self.batch_in_edit.setText(folder)
+        self._on_batch_paths_edited()
+
+    def _on_browse_batch_output(self) -> None:
+        start = self.batch_out_edit.text().strip() or str(Path.home())
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Batch Output Folder", start)
+        if not folder:
+            return
+        self.batch_out_edit.setText(folder)
+        self._on_batch_paths_edited()
+
+    def _on_batch_paths_edited(self) -> None:
+        self.batch_input_dir = self.batch_in_edit.text().strip()
+        self.batch_output_dir = self.batch_out_edit.text().strip()
+        self._settings.setValue("batchInputDir", self.batch_input_dir)
+        self._settings.setValue("batchOutputDir", self.batch_output_dir)
+
+    def _iter_batch_files(self, folder: Path) -> Iterable[Path]:
+        exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+        for p in sorted(folder.iterdir()):
+            if p.is_file() and p.suffix.lower() in exts:
+                yield p
+
+    def _on_run_batch(self) -> None:
+        if self._batch_running:
+            return
+
+        in_dir = Path(self.batch_in_edit.text().strip())
+        out_dir = Path(self.batch_out_edit.text().strip())
+        if not in_dir.exists() or not in_dir.is_dir():
+            QtWidgets.QMessageBox.warning(self, "Batch", "Please choose a valid input folder.")
+            return
+        if not out_dir:
+            QtWidgets.QMessageBox.warning(self, "Batch", "Please choose an output folder.")
+            return
+
+        files = list(self._iter_batch_files(in_dir))
+        if not files:
+            QtWidgets.QMessageBox.information(self, "Batch", "No supported images found in input folder.")
+            return
+
+        self._batch_running = True
+        self.batch_run_btn.setEnabled(False)
+        self.batch_progress.setRange(0, len(files))
+        self.batch_progress.setValue(0)
+        self.batch_progress.setFormat("Starting…")
+
+        task = _BatchTask(
+            files=files,
+            output_dir=out_dir,
+            base_params=self._base_params,
+            adjust_params=self._adjust_params,
+            strength=self._strength,
+        )
+        task.signals.progress.connect(self._on_batch_progress)
+        task.signals.finished.connect(self._on_batch_finished)
+        task.signals.failed.connect(self._on_batch_failed)
+        self._thread_pool.start(task)
+
+    def _on_batch_progress(self, done: int, total: int, filename: str) -> None:
+        self.batch_progress.setValue(done)
+        self.batch_progress.setFormat(f"{done}/{total} — {filename}")
+
+    def _on_batch_finished(self, ok: int, failed: int) -> None:
+        self._batch_running = False
+        self.batch_run_btn.setEnabled(True)
+        self.batch_progress.setFormat(f"Done — OK: {ok}, Failed: {failed}")
+        QtWidgets.QMessageBox.information(self, "Batch", f"Finished.\n\nOK: {ok}\nFailed: {failed}")
+
+    def _on_batch_failed(self, err: str) -> None:
+        self._batch_running = False
+        self.batch_run_btn.setEnabled(True)
+        self.batch_progress.setFormat("Failed")
+        QtWidgets.QMessageBox.critical(self, "Batch Error", err)
 
     def _on_reset(self) -> None:
         self._select_preset_by_name("None")
@@ -1091,8 +1288,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sidebar_toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow if visible else QtCore.Qt.ArrowType.RightArrow)
         # Keep professional/compact: narrow when collapsed, comfortable when expanded
         if visible:
-            self.sidebar_container.setMinimumWidth(320)
-            self.sidebar_container.setMaximumWidth(600)
+            # ~70% of the previous expanded width.
+            self.sidebar_container.setMinimumWidth(225)
+            self.sidebar_container.setMaximumWidth(420)
         else:
             self.sidebar_container.setMinimumWidth(34)
             self.sidebar_container.setMaximumWidth(34)
