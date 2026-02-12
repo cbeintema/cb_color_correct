@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Union
 
 import numpy as np
 
@@ -25,7 +25,7 @@ class Lut3D:
     table: np.ndarray  # shape (size, size, size, 3) with axes (r, g, b)
 
 
-CubeLut = Lut1D | Lut3D
+CubeLut = Union[Lut1D, Lut3D]
 
 
 class CubeParseError(ValueError):

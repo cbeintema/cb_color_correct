@@ -19,6 +19,49 @@ from cb_color_correct.curve_editor import CurveEditor
 from cb_color_correct.theme import apply_ableton_theme
 
 
+def validate_packages() -> None:
+    """Validate that required and optional packages are available."""
+    missing_required = []
+    missing_optional = []
+    
+    # Check required packages
+    required = [
+        ("numpy", "numpy"),
+        ("PIL", "Pillow"),
+        ("PySide6", "PySide6"),
+    ]
+    
+    for module_name, package_name in required:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing_required.append(package_name)
+    
+    # Check optional packages
+    optional = [
+        ("pilgram2", "pilgram2", "Instagram filters will not be available"),
+    ]
+    
+    for module_name, package_name, description in optional:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing_optional.append((package_name, description))
+    
+    # Report missing packages
+    if missing_required:
+        print(f"ERROR: Missing required packages: {', '.join(missing_required)}", file=sys.stderr)
+        print("Please run: pip install -r requirements.txt", file=sys.stderr)
+        sys.exit(1)
+    
+    if missing_optional:
+        print("WARNING: Optional packages missing:", file=sys.stderr)
+        for package_name, description in missing_optional:
+            print(f"  - {package_name}: {description}", file=sys.stderr)
+        print("To install optional packages: pip install -r requirements.txt", file=sys.stderr)
+        print()
+
+
 class _RenderSignals(QtCore.QObject):
     finished = QtCore.Signal(int, object)  # generation, rgb8 ndarray
     failed = QtCore.Signal(int, str)  # generation, error text
@@ -331,14 +374,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.adjust_sidebar = QtWidgets.QWidget()
         self.adjust_sidebar.setObjectName("AdjustSidebar")
         sidebar_layout = QtWidgets.QVBoxLayout(self.adjust_sidebar)
-        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setContentsMargins(0, 0, 8, 0)
         sidebar_layout.setSpacing(10)
 
         self.strength_label = QtWidgets.QLabel("Strength: 100%")
         self.strength_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.strength_slider.setRange(0, 100)
         self.strength_slider.setValue(100)
-        self.strength_slider.setFixedWidth(self._slider_width)
+        self.strength_slider.setMinimumWidth(180)
         sidebar_layout.addWidget(self.strength_label)
         sidebar_layout.addWidget(self.strength_slider)
 
@@ -348,7 +391,7 @@ class MainWindow(QtWidgets.QMainWindow):
         adjust_root = QtWidgets.QWidget()
         self._adjust_scroll.setWidget(adjust_root)
         self._adjust_layout = QtWidgets.QVBoxLayout(adjust_root)
-        self._adjust_layout.setContentsMargins(0, 0, 0, 0)
+        self._adjust_layout.setContentsMargins(0, 0, 8, 0)
         self._adjust_layout.setSpacing(8)
         self._build_adjustment_widgets()
         sidebar_layout.addWidget(self._adjust_scroll, 1)
@@ -368,6 +411,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_btn.clicked.connect(self._on_save)
         self.reset_btn.clicked.connect(self._on_reset)
         self.preset_tree.currentItemChanged.connect(self._on_preset_item_changed)
+        self.preset_tree.itemClicked.connect(self._on_preset_item_clicked)
         self.preset_favorites_only.toggled.connect(self._on_favorites_only_toggled)
         self.strength_slider.valueChanged.connect(self._on_strength_change)
         self.sidebar_toggle.toggled.connect(self._set_adjustments_visible)
@@ -694,6 +738,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._base_params = self._presets[i].params
         self._schedule_apply()
 
+    def _on_preset_item_clicked(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        column: int,
+    ) -> None:
+        # Toggle expansion when clicking on category names (not presets)
+        idx = item.data(0, int(QtCore.Qt.ItemDataRole.UserRole))
+        if idx is None:  # This is a category item
+            item.setExpanded(not item.isExpanded())
+
     def _on_favorite_button_for_index(self, i: int) -> None:
         if i < 0 or i >= len(self._presets):
             return
@@ -795,8 +849,8 @@ class MainWindow(QtWidgets.QMainWindow):
             cat_item.setSizeHint(0, QtCore.QSize(0, 22))
             self.preset_tree.addTopLevelItem(cat_item)
 
-            # Expand a couple by default
-            cat_item.setExpanded(cat_name in ("General", "Film / Chemical"))
+            # All categories collapsed by default
+            cat_item.setExpanded(False)
 
             for idx, preset in items:
                 child = QtWidgets.QTreeWidgetItem([preset.name, ""])
@@ -869,6 +923,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tone_group.setChecked(True)
         tone_form = QtWidgets.QFormLayout(self.tone_group)
         tone_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        tone_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         tone_form.setContentsMargins(6, 6, 6, 6)
         tone_form.setHorizontalSpacing(8)
         tone_form.setVerticalSpacing(4)
@@ -891,6 +946,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.color_group.setChecked(True)
         color_form = QtWidgets.QFormLayout(self.color_group)
         color_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        color_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         color_form.setContentsMargins(6, 6, 6, 6)
         color_form.setHorizontalSpacing(8)
         color_form.setVerticalSpacing(4)
@@ -909,6 +965,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wb_group.setChecked(False)
         wb_form = QtWidgets.QFormLayout(self.wb_group)
         wb_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        wb_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         wb_form.setContentsMargins(6, 6, 6, 6)
         wb_form.setHorizontalSpacing(8)
         wb_form.setVerticalSpacing(4)
@@ -924,6 +981,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sh_group.setChecked(False)
         sh_form = QtWidgets.QFormLayout(self.sh_group)
         sh_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        sh_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         sh_form.setContentsMargins(6, 6, 6, 6)
         sh_form.setHorizontalSpacing(8)
         sh_form.setVerticalSpacing(4)
@@ -939,6 +997,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.split_group.setChecked(False)
         split_form = QtWidgets.QFormLayout(self.split_group)
         split_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        split_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         split_form.setContentsMargins(6, 6, 6, 6)
         split_form.setHorizontalSpacing(8)
         split_form.setVerticalSpacing(4)
@@ -962,6 +1021,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.effects_group.setChecked(False)
         fx_form = QtWidgets.QFormLayout(self.effects_group)
         fx_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        fx_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         fx_form.setContentsMargins(6, 6, 6, 6)
         fx_form.setHorizontalSpacing(8)
         fx_form.setVerticalSpacing(4)
@@ -982,6 +1042,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.levels_group.setChecked(True)
         levels_form = QtWidgets.QFormLayout(self.levels_group)
         levels_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        levels_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         levels_form.setContentsMargins(6, 6, 6, 6)
         levels_form.setHorizontalSpacing(8)
         levels_form.setVerticalSpacing(4)
@@ -1375,9 +1436,10 @@ class MainWindow(QtWidgets.QMainWindow):
         s.setRange(min_v, max_v)
         s.setValue(value)
         s.setSingleStep(1)
-        s.setFixedWidth(self._slider_width)
+        s.setMinimumWidth(180)
         lab = QtWidgets.QLabel("0")
         lab.setMinimumWidth(52)
+        lab.setFixedWidth(52)
         lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         return s, lab
 
@@ -1398,8 +1460,8 @@ class MainWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QHBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
-        lay.addWidget(slider, 1)
-        lay.addWidget(label)
+        lay.addWidget(slider, 1)  # stretch factor 1 allows slider to expand
+        lay.addWidget(label, 0)   # stretch factor 0 keeps label fixed
         return w
 
     def _filterparams_to_dict(self, p: FilterParams) -> dict:
@@ -1539,6 +1601,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main() -> int:
+    validate_packages()
+    
     app = QtWidgets.QApplication(sys.argv)
 
     apply_ableton_theme(app)

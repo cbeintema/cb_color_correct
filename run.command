@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# Set encoding to prevent pip compile errors
+export PYTHONIOENCODING=utf-8
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
 cd "$(dirname "$0")"
 
 PY=".venv/bin/python"
