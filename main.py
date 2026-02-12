@@ -155,6 +155,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "User",
             "LUTs",
         ]
+        self._favorite_keys: set[str] = set()
+        self._slider_width = 270
 
         root = QtWidgets.QWidget()
         self.setCentralWidget(root)
@@ -182,6 +184,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # User presets folder
         self._settings = QtCore.QSettings("CB", "CB Color Correct")
         self.user_presets_dir = str(self._settings.value("userPresetsDir", ""))
+        try:
+            raw_favs = str(self._settings.value("favoritePresetKeys", "[]"))
+            fav_list = json.loads(raw_favs)
+            if isinstance(fav_list, list):
+                self._favorite_keys = {str(v) for v in fav_list}
+        except Exception:
+            self._favorite_keys = set()
 
         presets_dir_row = QtWidgets.QWidget()
         presets_dir_layout = QtWidgets.QHBoxLayout(presets_dir_row)
@@ -256,14 +265,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preset_tree = QtWidgets.QTreeWidget()
         self.preset_tree.setMinimumWidth(260)
         self.preset_tree.setHeaderHidden(True)
+        self.preset_tree.setColumnCount(2)
+        header = self.preset_tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        header.setMinimumSectionSize(8)
+        header.resizeSection(1, 28)
         self.preset_tree.setRootIsDecorated(True)
         self.preset_tree.setUniformRowHeights(True)
         self.preset_tree.setWordWrap(False)
         self.preset_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
-        self._rebuild_preset_tree(select_name="None")
 
-        left_layout.addWidget(QtWidgets.QLabel("Presets"))
+        presets_hdr = QtWidgets.QWidget()
+        presets_hdr_l = QtWidgets.QHBoxLayout(presets_hdr)
+        presets_hdr_l.setContentsMargins(0, 0, 0, 0)
+        presets_hdr_l.setSpacing(6)
+        presets_hdr_l.addWidget(QtWidgets.QLabel("Presets"))
+        presets_hdr_l.addStretch(1)
+
+        self.preset_favorites_only = QtWidgets.QCheckBox("Fav only")
+        self.preset_favorites_only.setChecked(False)
+
+        presets_hdr_l.addWidget(self.preset_favorites_only)
+
+        left_layout.addWidget(presets_hdr)
         left_layout.addWidget(self.preset_tree, 1)
+        self._rebuild_preset_tree(select_name="None")
 
         self.reset_btn = QtWidgets.QPushButton("Reset")
         left_layout.addWidget(self.reset_btn)
@@ -310,6 +338,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strength_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.strength_slider.setRange(0, 100)
         self.strength_slider.setValue(100)
+        self.strength_slider.setFixedWidth(self._slider_width)
         sidebar_layout.addWidget(self.strength_label)
         sidebar_layout.addWidget(self.strength_slider)
 
@@ -339,6 +368,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_btn.clicked.connect(self._on_save)
         self.reset_btn.clicked.connect(self._on_reset)
         self.preset_tree.currentItemChanged.connect(self._on_preset_item_changed)
+        self.preset_favorites_only.toggled.connect(self._on_favorites_only_toggled)
         self.strength_slider.valueChanged.connect(self._on_strength_change)
         self.sidebar_toggle.toggled.connect(self._set_adjustments_visible)
 
@@ -664,6 +694,66 @@ class MainWindow(QtWidgets.QMainWindow):
         self._base_params = self._presets[i].params
         self._schedule_apply()
 
+    def _on_favorite_button_for_index(self, i: int) -> None:
+        if i < 0 or i >= len(self._presets):
+            return
+        preset = self._presets[i]
+        key = self._preset_key(preset)
+        if key in self._favorite_keys:
+            self._favorite_keys.remove(key)
+        else:
+            self._favorite_keys.add(key)
+        self._save_favorites()
+        self._rebuild_preset_tree(select_name=preset.name)
+
+    def _make_favorite_button(self, idx: int) -> QtWidgets.QPushButton:
+        is_fav = self._is_favorite_preset(self._presets[idx])
+        btn = QtWidgets.QPushButton("★" if is_fav else "☆")
+        btn.setObjectName("FavPresetButton")
+        btn.setCheckable(True)
+        btn.setChecked(is_fav)
+        btn.setToolTip("Toggle favorite")
+        btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        btn.setFlat(True)
+        btn.setFixedSize(16, 16)
+        star_font = btn.font()
+        star_font.setPointSize(11)
+        star_font.setBold(True)
+        btn.setFont(star_font)
+        btn.clicked.connect(lambda _checked=False, i=idx: self._on_favorite_button_for_index(i))
+        return btn
+
+    def _current_preset_index(self) -> int | None:
+        item = self.preset_tree.currentItem()
+        if not item:
+            return None
+        idx = item.data(0, int(QtCore.Qt.ItemDataRole.UserRole))
+        if idx is None:
+            return None
+        try:
+            i = int(idx)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= i < len(self._presets):
+            return i
+        return None
+
+    def _preset_key(self, preset: FilterPreset) -> str:
+        src = preset.source_path or ""
+        pilgram_name = preset.params.pilgram_filter or ""
+        return f"{preset.category}|{preset.name}|{src}|{pilgram_name}"
+
+    def _is_favorite_preset(self, preset: FilterPreset) -> bool:
+        return self._preset_key(preset) in self._favorite_keys
+
+    def _save_favorites(self) -> None:
+        self._settings.setValue("favoritePresetKeys", json.dumps(sorted(self._favorite_keys)))
+
+    def _on_favorites_only_toggled(self, checked: bool) -> None:
+        current_idx = self._current_preset_index()
+        current_name = self._presets[current_idx].name if current_idx is not None else None
+        self._rebuild_preset_tree(select_name=current_name)
+
     def _select_preset_by_name(self, name: str) -> None:
         matches = [i for i, p in enumerate(self._presets) if p.name == name]
         if not matches:
@@ -685,10 +775,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _rebuild_preset_tree(self, select_name: str | None = None) -> None:
         self.preset_tree.clear()
+        favorites_only = self.preset_favorites_only.isChecked() if hasattr(self, "preset_favorites_only") else False
 
         # Group presets by category
         cats: dict[str, list[tuple[int, FilterPreset]]] = {}
         for i, p in enumerate(self._presets):
+            if favorites_only and not self._is_favorite_preset(p):
+                continue
             cats.setdefault(p.category, []).append((i, p))
 
         def add_category(cat_name: str) -> None:
@@ -699,15 +792,18 @@ class MainWindow(QtWidgets.QMainWindow):
             cat_item = QtWidgets.QTreeWidgetItem([cat_name])
             cat_item.setData(0, int(QtCore.Qt.ItemDataRole.UserRole), None)
             cat_item.setFlags(cat_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+            cat_item.setSizeHint(0, QtCore.QSize(0, 22))
             self.preset_tree.addTopLevelItem(cat_item)
 
             # Expand a couple by default
             cat_item.setExpanded(cat_name in ("General", "Film / Chemical"))
 
             for idx, preset in items:
-                child = QtWidgets.QTreeWidgetItem([preset.name])
+                child = QtWidgets.QTreeWidgetItem([preset.name, ""])
                 child.setData(0, int(QtCore.Qt.ItemDataRole.UserRole), idx)
+                child.setSizeHint(0, QtCore.QSize(0, 22))
                 cat_item.addChild(child)
+                self.preset_tree.setItemWidget(child, 1, self._make_favorite_button(idx))
 
         for cat in self._category_order:
             add_category(cat)
@@ -1279,6 +1375,7 @@ class MainWindow(QtWidgets.QMainWindow):
         s.setRange(min_v, max_v)
         s.setValue(value)
         s.setSingleStep(1)
+        s.setFixedWidth(self._slider_width)
         lab = QtWidgets.QLabel("0")
         lab.setMinimumWidth(52)
         lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)

@@ -27,7 +27,7 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
     pal.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(34, 34, 34))
 
     # Selection / accent
-    pal.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(78, 144, 215))
+    pal.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(95, 185, 110))
     pal.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(255, 255, 255))
 
     # Tooltips
@@ -56,6 +56,22 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
         QPushButton:pressed, QToolButton:pressed { background: #1f1f1f; }
         QPushButton:disabled, QToolButton:disabled { color: #8a8a8a; background: #1a1a1a; border-color: #2a2a2a; }
 
+        /* Compact inline favorite star button in preset rows */
+        QPushButton#FavPresetButton {
+            background: transparent;
+            border: none;
+            padding: 0px;
+            margin: 0px;
+            color: #a0a0a0;
+            min-width: 16px;
+            max-width: 16px;
+            min-height: 16px;
+            max-height: 16px;
+            text-align: center;
+        }
+        QPushButton#FavPresetButton:hover { color: #d7d7d7; }
+        QPushButton#FavPresetButton:checked { color: #f1c84a; }
+
         /* Combos */
         QComboBox {
             background: #1f1f1f;
@@ -76,7 +92,7 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
             min-height: 22px;
         }
         QLineEdit:hover { border-color: #3c3c3c; }
-        QLineEdit:focus { border-color: #4e90d7; }
+        QLineEdit:focus { border-color: #5fb96e; }
 
         /* Trees / lists */
         QTreeWidget {
@@ -89,7 +105,7 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
             padding: 4px 6px;
             min-height: 22px;
         }
-        QTreeWidget::item:selected { background: #2b4b6b; }
+        QTreeWidget::item:selected { background: #294833; }
         QTreeWidget::item:hover { background: #1d1d1d; }
 
         /* Group boxes: flatter, Ableton-ish */
@@ -109,7 +125,7 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
 
         /* Sliders */
         QSlider::groove:horizontal { height: 4px; background: #3a3a3a; border-radius: 2px; }
-        QSlider::sub-page:horizontal { background: #4e90d7; border-radius: 2px; }
+        QSlider::sub-page:horizontal { background: #5fb96e; border-radius: 2px; }
         QSlider::add-page:horizontal { background: #2a2a2a; border-radius: 2px; }
         QSlider::handle:horizontal { width: 12px; margin: -6px 0; border-radius: 6px; background: #d0d0d0; }
 
@@ -158,7 +174,7 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
             min-height: 18px;
         }
         QProgressBar::chunk {
-            background-color: #4e90d7;
+            background-color: #5fb96e;
             border-radius: 3px;
         }
         """
