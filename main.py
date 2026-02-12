@@ -15,6 +15,7 @@ from cb_color_correct.filters import FilterPreset, presets
 from cb_color_correct.image_ops import FilterParams, process_rgb8_stack
 from cb_color_correct.lut import CubeParseError, load_cube
 from cb_color_correct.curve_editor import CurveEditor
+from cb_color_correct.theme import apply_ableton_theme
 
 
 class _RenderSignals(QtCore.QObject):
@@ -1150,52 +1151,7 @@ class MainWindow(QtWidgets.QMainWindow):
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
 
-    # Dark, professional theme (Fusion + palette + light QSS).
-    app.setStyle("Fusion")
-    pal = QtGui.QPalette()
-    pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(30, 30, 30))
-    pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(230, 230, 230))
-    pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(22, 22, 22))
-    pal.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(30, 30, 30))
-    pal.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(230, 230, 230))
-    pal.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(30, 30, 30))
-    pal.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(230, 230, 230))
-    pal.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(40, 40, 40))
-    pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(230, 230, 230))
-    pal.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor(255, 0, 0))
-    pal.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(60, 120, 200))
-    pal.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(255, 255, 255))
-    app.setPalette(pal)
-
-    app.setStyleSheet(
-        """
-        QMainWindow { background: #1e1e1e; }
-        QLabel { color: #e6e6e6; }
-        QPushButton, QToolButton {
-            padding: 4px 8px;
-            border: 1px solid #3a3a3a;
-            border-radius: 4px;
-            background: #2a2a2a;
-        }
-        QPushButton:hover, QToolButton:hover { background: #303030; }
-        QPushButton:pressed, QToolButton:pressed { background: #242424; }
-        QGroupBox {
-            border: 1px solid #3a3a3a;
-            border-radius: 4px;
-            margin-top: 8px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 8px;
-            padding: 0 4px;
-        }
-        QTreeWidget, QListWidget { background: #161616; border: 1px solid #3a3a3a; }
-        QScrollArea { border: none; }
-        QSlider::groove:horizontal { height: 4px; background: #3a3a3a; border-radius: 2px; }
-        QSlider::handle:horizontal { width: 12px; margin: -6px 0; border-radius: 6px; background: #cfcfcf; }
-        QSlider::sub-page:horizontal { background: #3c78c8; border-radius: 2px; }
-        """
-    )
+    apply_ableton_theme(app)
 
     w = MainWindow()
     w.resize(1200, 800)
