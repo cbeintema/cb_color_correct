@@ -124,10 +124,33 @@ class MainWindow(QtWidgets.QMainWindow):
         left_layout.addWidget(self.save_preset_btn)
         left_layout.addWidget(self.save_btn)
 
+        # User presets folder
+        self._settings = QtCore.QSettings("CB", "CB Color Correct")
+        self.user_presets_dir = str(self._settings.value("userPresetsDir", ""))
+
+        presets_dir_row = QtWidgets.QWidget()
+        presets_dir_layout = QtWidgets.QHBoxLayout(presets_dir_row)
+        presets_dir_layout.setContentsMargins(0, 0, 0, 0)
+        presets_dir_layout.setSpacing(6)
+
+        self.user_presets_edit = QtWidgets.QLineEdit()
+        self.user_presets_edit.setPlaceholderText("User presets folder (optional)")
+        self.user_presets_edit.setText(self.user_presets_dir)
+
+        self.user_presets_browse_btn = QtWidgets.QToolButton()
+        self.user_presets_browse_btn.setText("Browse")
+
+        presets_dir_layout.addWidget(self.user_presets_edit, 1)
+        presets_dir_layout.addWidget(self.user_presets_browse_btn)
+        left_layout.addWidget(presets_dir_row)
+
         self.preset_tree = QtWidgets.QTreeWidget()
         self.preset_tree.setMinimumWidth(260)
         self.preset_tree.setHeaderHidden(True)
         self.preset_tree.setRootIsDecorated(True)
+        self.preset_tree.setUniformRowHeights(True)
+        self.preset_tree.setWordWrap(False)
+        self.preset_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self._rebuild_preset_tree(select_name="None")
 
         left_layout.addWidget(QtWidgets.QLabel("Presets"))
@@ -210,7 +233,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strength_slider.valueChanged.connect(self._on_strength_change)
         self.sidebar_toggle.toggled.connect(self._set_adjustments_visible)
 
+        self.user_presets_browse_btn.clicked.connect(self._on_browse_user_presets_dir)
+        self.user_presets_edit.editingFinished.connect(self._on_user_presets_dir_edited)
+
         self._apply_current()
+
+        # Load user presets from configured folder on startup.
+        self._reload_user_presets_from_folder()
 
     def _on_load(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -286,10 +315,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         name = name.strip()
 
+        default_dir = Path(self.user_presets_dir) if self.user_presets_dir else Path.home()
+        if not default_dir.exists():
+            default_dir = Path.home()
+
         fn, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Preset",
-            str(Path.home() / f"{name}.json"),
+            str(default_dir / f"{name}.json"),
             "Preset JSON (*.json)",
         )
         if not fn:
@@ -348,6 +381,64 @@ class MainWindow(QtWidgets.QMainWindow):
         if category not in self._category_order:
             self._category_order.insert(-1, category)
         self._rebuild_preset_tree(select_name=name)
+
+    def _on_browse_user_presets_dir(self) -> None:
+        start = self.user_presets_dir or str(Path.home())
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select User Presets Folder", start)
+        if not folder:
+            return
+        self.user_presets_edit.setText(folder)
+        self._set_user_presets_dir(folder)
+
+    def _on_user_presets_dir_edited(self) -> None:
+        self._set_user_presets_dir(self.user_presets_edit.text().strip())
+
+    def _set_user_presets_dir(self, folder: str) -> None:
+        self.user_presets_dir = folder
+        self._settings.setValue("userPresetsDir", folder)
+        self._reload_user_presets_from_folder()
+
+    def _reload_user_presets_from_folder(self) -> None:
+        # Remove previously folder-loaded user presets (keep in-session User presets).
+        self._presets = [p for p in self._presets if not (p.category == "User" and p.source_path)]
+
+        if not self.user_presets_dir:
+            self._rebuild_preset_tree(select_name="None")
+            return
+
+        folder = Path(self.user_presets_dir)
+        if not folder.exists() or not folder.is_dir():
+            self._rebuild_preset_tree(select_name="None")
+            return
+
+        for path in sorted(folder.glob("*.json")):
+            preset = self._load_user_preset_file(path)
+            if preset is None:
+                continue
+            self._presets.append(preset)
+
+        self._rebuild_preset_tree(select_name=None)
+
+    def _load_user_preset_file(self, path: Path) -> FilterPreset | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        # Supports our save format {name, base, adjust} and a simpler {name, params}.
+        name = str(payload.get("name") or path.stem)
+        category = str(payload.get("category") or "User")
+        if category != "User":
+            category = "User"
+
+        if "base" in payload or "adjust" in payload:
+            base = self._filterparams_from_dict(payload.get("base") or {})
+            adjust = self._filterparams_from_dict(payload.get("adjust") or {})
+            combined = self._combine_params(base, adjust)
+        else:
+            combined = self._filterparams_from_dict(payload.get("params") or payload)
+
+        return FilterPreset(name=name, params=combined, category="User", source_path=str(path))
 
     def _on_reset(self) -> None:
         self._select_preset_by_name("None")

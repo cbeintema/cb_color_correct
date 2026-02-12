@@ -11,6 +11,7 @@ class FilterPreset:
     name: str
     params: FilterParams
     category: str = "General"
+    source_path: str | None = None
 
 
 def presets() -> List[FilterPreset]:

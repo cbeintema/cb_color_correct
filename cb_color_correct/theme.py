@@ -67,6 +67,17 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
         QComboBox:hover { border-color: #3c3c3c; }
         QComboBox::drop-down { border: 0px; width: 18px; }
 
+        /* Line edits */
+        QLineEdit {
+            background: #121212;
+            border: 1px solid #343434;
+            border-radius: 4px;
+            padding: 3px 8px;
+            min-height: 22px;
+        }
+        QLineEdit:hover { border-color: #3c3c3c; }
+        QLineEdit:focus { border-color: #4e90d7; }
+
         /* Trees / lists */
         QTreeWidget {
             background: #121212;
@@ -74,7 +85,10 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
             border-radius: 4px;
             outline: none;
         }
-        QTreeWidget::item { padding: 5px 6px; }
+        QTreeWidget::item {
+            padding: 4px 6px;
+            min-height: 22px;
+        }
         QTreeWidget::item:selected { background: #2b4b6b; }
         QTreeWidget::item:hover { background: #1d1d1d; }
 
