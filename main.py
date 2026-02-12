@@ -4,6 +4,7 @@ import sys
 from dataclasses import dataclass
 from dataclasses import replace
 import json
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,36 @@ from cb_color_correct.filters import FilterPreset, presets
 from cb_color_correct.image_ops import FilterParams, process_rgb8_stack
 from cb_color_correct.lut import CubeParseError, load_cube
 from cb_color_correct.curve_editor import CurveEditor
+
+
+class _RenderSignals(QtCore.QObject):
+    finished = QtCore.Signal(int, object)  # generation, rgb8 ndarray
+    failed = QtCore.Signal(int, str)  # generation, error text
+
+
+class _RenderTask(QtCore.QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        preview_rgb8: np.ndarray,
+        base_params: FilterParams,
+        adjust_params: FilterParams,
+        strength: float,
+    ) -> None:
+        super().__init__()
+        self.generation = generation
+        self.preview_rgb8 = preview_rgb8
+        self.base_params = base_params
+        self.adjust_params = adjust_params
+        self.strength = strength
+        self.signals = _RenderSignals()
+
+    def run(self) -> None:
+        try:
+            rgb8 = process_rgb8_stack(self.preview_rgb8, [self.base_params, self.adjust_params], self.strength)
+            self.signals.finished.emit(self.generation, rgb8)
+        except Exception:
+            self.signals.failed.emit(self.generation, traceback.format_exc())
 
 
 def pil_to_rgb8(pil_img: Image.Image) -> np.ndarray:
@@ -52,6 +83,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_timer = QtCore.QTimer(self)
         self._apply_timer.setSingleShot(True)
         self._apply_timer.timeout.connect(self._apply_current)
+
+        self._thread_pool = QtCore.QThreadPool.globalInstance()
+        # Single worker keeps UI consistent (latest result wins anyway).
+        self._thread_pool.setMaxThreadCount(1)
+        self._render_generation = 0
 
         self._presets = presets()
         self._category_order = [
@@ -412,10 +448,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self._base_pixmap = None
             return
 
-        rgb8 = process_rgb8_stack(self._loaded.preview_rgb8, [self._base_params, self._adjust_params], self._strength)
-        qimg = rgb8_to_qimage(rgb8)
+        self._render_generation += 1
+        gen = self._render_generation
+
+        task = _RenderTask(
+            generation=gen,
+            preview_rgb8=self._loaded.preview_rgb8,
+            base_params=self._base_params,
+            adjust_params=self._adjust_params,
+            strength=self._strength,
+        )
+        task.signals.finished.connect(self._on_render_finished)
+        task.signals.failed.connect(self._on_render_failed)
+        self._thread_pool.start(task)
+
+    def _on_render_finished(self, generation: int, rgb8: object) -> None:
+        if generation != self._render_generation:
+            return
+        arr = rgb8  # ndarray
+        qimg = rgb8_to_qimage(arr)
         self._base_pixmap = QtGui.QPixmap.fromImage(qimg)
         self._refit_pixmap()
+
+    def _on_render_failed(self, generation: int, err: str) -> None:
+        if generation != self._render_generation:
+            return
+        # Keep it quiet in normal operation; show a dialog only for current render failure.
+        QtWidgets.QMessageBox.critical(self, "Render Error", err)
 
     def _build_adjustment_widgets(self) -> None:
         # Tone group
