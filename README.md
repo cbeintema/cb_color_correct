@@ -4,8 +4,18 @@ Simple desktop image color-correction preset tool (PySide6).
 
 ## Run
 
+macOS: double-click `run.command` (or run `./run.command`)
+
+Windows: double-click `run.bat`
+
+These scripts will create `.venv` and install `requirements.txt` on first run.
+
+Manual:
+
 ```bash
-/Users/christopherrbeintema/cb_color_correct/.venv/bin/python main.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python main.py
 ```
 
 ## What it does
