@@ -36,6 +36,38 @@ Potential improvements:
 
 ## Completed
 
+### Recently completed (2026-02-12)
+
+- Curves toggle bug fix: disabling Curves no longer discards curve data; re-enabling reapplies existing curve state immediately.
+- Favorites list stability fixes:
+  - resolved persistent preset row spacing growth on favorite toggle,
+  - moved favorites star to text column interaction,
+  - enforced stable row heights.
+- Favorites view behavior:
+  - when `Fav only` is enabled, visible categories auto-expand,
+  - previous non-favorites expand/collapse state is restored when exiting `Fav only`.
+- Preview interaction upgrades:
+  - zoom controls (`+`, `-`, `Fit`, `Actual Size`),
+  - panning via middle-drag and Space+drag,
+  - macOS pinch zoom and Cmd/Ctrl+wheel zoom,
+  - draggable split preview divider.
+- Toolbar UX updates:
+  - `Adjustments` renamed to `Modifications`,
+  - `M` toggles modifications panel,
+  - undo/redo buttons added and grouped separately from zoom controls,
+  - split preview control moved to centered position.
+- Undo/redo improvements:
+  - history stack added for filter adjustments,
+  - shortcut handling strengthened for macOS (`Cmd+Z`, `Cmd+Shift+Z`) with fallbacks.
+- File workflow improvements:
+  - shortcuts for open/save (`Cmd/Ctrl+O`, `Cmd/Ctrl+S`),
+  - open dialog remembers last used image folder.
+- Zoom hotkeys added:
+  - `Cmd/Ctrl +` zoom in,
+  - `Cmd/Ctrl -` zoom out,
+  - `Cmd/Ctrl+A` actual size,
+  - `Cmd/Ctrl+F` fit.
+
 - Basic preset browser with categories
 - LUT load (.cube 1D/3D)
 - Adjustment sliders: Exposure/Brightness/Contrast/Hue/Saturation/Vibrance + Levels
