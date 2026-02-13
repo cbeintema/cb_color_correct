@@ -56,22 +56,6 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
         QPushButton:pressed, QToolButton:pressed { background: #1f1f1f; }
         QPushButton:disabled, QToolButton:disabled { color: #8a8a8a; background: #1a1a1a; border-color: #2a2a2a; }
 
-        /* Compact inline favorite star button in preset rows */
-        QPushButton#FavPresetButton {
-            background: transparent;
-            border: none;
-            padding: 0px;
-            margin: 0px;
-            color: #a0a0a0;
-            min-width: 16px;
-            max-width: 16px;
-            min-height: 16px;
-            max-height: 16px;
-            text-align: center;
-        }
-        QPushButton#FavPresetButton:hover { color: #d7d7d7; }
-        QPushButton#FavPresetButton:checked { color: #f1c84a; }
-
         /* Combos */
         QComboBox {
             background: #1f1f1f;
@@ -103,10 +87,13 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
         }
         QTreeWidget::item {
             padding: 4px 6px;
+            height: 22px;
             min-height: 22px;
+            max-height: 22px;
         }
         QTreeWidget::item:selected { background: #294833; }
         QTreeWidget::item:hover { background: #1d1d1d; }
+        QTreeWidget::item:selected:!active { background: #294833; }
 
         /* Group boxes: flatter, Ableton-ish */
         QGroupBox {

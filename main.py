@@ -167,6 +167,115 @@ class LoadedImage:
     preview_rgb8: np.ndarray
 
 
+@dataclass
+class _HistoryState:
+    base_params: FilterParams
+    adjust_params: FilterParams
+    strength: float
+
+
+class _FixedRowHeightDelegate(QtWidgets.QStyledItemDelegate):
+    def __init__(self, row_height: int, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self._row_height = int(row_height)
+
+    def sizeHint(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> QtCore.QSize:
+        size = super().sizeHint(option, index)
+        size.setHeight(self._row_height)
+        return size
+
+
+class _PanScrollArea(QtWidgets.QScrollArea):
+    pinchZoomRequested = QtCore.Signal(float, object)  # factor, viewport QPoint
+    wheelZoomRequested = QtCore.Signal(float, object)  # factor, viewport QPoint
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._space_pan_enabled = False
+        self._panning = False
+        self._pan_start = QtCore.QPoint(0, 0)
+        self._pan_h = 0
+        self._pan_v = 0
+        self.viewport().installEventFilter(self)
+
+    def set_space_pan_enabled(self, enabled: bool) -> None:
+        self._space_pan_enabled = bool(enabled)
+        if self._panning:
+            return
+        if self._space_pan_enabled:
+            self.viewport().setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def _begin_pan(self, pos: QtCore.QPoint) -> None:
+        self._panning = True
+        self._pan_start = QtCore.QPoint(pos)
+        self._pan_h = self.horizontalScrollBar().value()
+        self._pan_v = self.verticalScrollBar().value()
+        self.viewport().setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+
+    def _end_pan(self) -> None:
+        self._panning = False
+        if self._space_pan_enabled:
+            self.viewport().setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+            self._begin_pan(event.position().toPoint())
+            event.accept()
+            return
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._space_pan_enabled:
+            self._begin_pan(event.position().toPoint())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._panning:
+            delta = event.position().toPoint() - self._pan_start
+            self.horizontalScrollBar().setValue(self._pan_h - delta.x())
+            self.verticalScrollBar().setValue(self._pan_v - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._panning and event.button() in (QtCore.Qt.MouseButton.MiddleButton, QtCore.Qt.MouseButton.LeftButton):
+            self._end_pan()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if watched is self.viewport() and event.type() == QtCore.QEvent.Type.NativeGesture:
+            ng = event  # QNativeGestureEvent
+            if ng.gestureType() == QtCore.Qt.NativeGestureType.ZoomNativeGesture:
+                value = float(ng.value())
+                factor = max(0.2, min(5.0, 1.0 + value))
+                self.pinchZoomRequested.emit(factor, ng.position().toPoint())
+                return True
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        mods = event.modifiers()
+        if mods & (QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.MetaModifier):
+            delta = event.angleDelta().y()
+            if delta == 0:
+                delta = event.pixelDelta().y()
+            if delta != 0:
+                factor = 1.12 if delta > 0 else (1.0 / 1.12)
+                self.wheelZoomRequested.emit(factor, event.position().toPoint())
+                event.accept()
+                return
+        super().wheelEvent(event)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -177,6 +286,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adjust_params = FilterParams()
         self._strength = 1.0
         self._base_pixmap: QtGui.QPixmap | None = None
+        self._original_preview_pixmap: QtGui.QPixmap | None = None
+        self._zoom_mode: str = "fit"  # fit | custom
+        self._zoom_factor: float = 1.0
+        self._space_pan_active = False
+        self._split_preview_enabled = False
+        self._split_divider_ratio = 0.5
+        self._dragging_split_divider = False
+        self._undo_stack: list[_HistoryState] = []
+        self._redo_stack: list[_HistoryState] = []
+        self._history_restoring = False
+        self._history_last_state = _HistoryState(self._base_params, self._adjust_params, self._strength)
 
         self._apply_timer = QtCore.QTimer(self)
         self._apply_timer.setSingleShot(True)
@@ -199,6 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "LUTs",
         ]
         self._favorite_keys: set[str] = set()
+        self._preset_tree_expand_state_before_favorites: dict[str, bool] | None = None
         self._slider_width = 270
 
         root = QtWidgets.QWidget()
@@ -227,6 +348,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # User presets folder
         self._settings = QtCore.QSettings("CB", "CB Color Correct")
         self.user_presets_dir = str(self._settings.value("userPresetsDir", ""))
+        self.last_open_image_dir = str(self._settings.value("lastOpenImageDir", ""))
         try:
             raw_favs = str(self._settings.value("favoritePresetKeys", "[]"))
             fav_list = json.loads(raw_favs)
@@ -319,6 +441,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preset_tree.setUniformRowHeights(True)
         self.preset_tree.setWordWrap(False)
         self.preset_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        self.preset_tree.setItemDelegate(_FixedRowHeightDelegate(22, self.preset_tree))
 
         presets_hdr = QtWidgets.QWidget()
         presets_hdr_l = QtWidgets.QHBoxLayout(presets_hdr)
@@ -349,12 +472,57 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.image_label = QtWidgets.QLabel("Load an image to begin")
         self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(640, 480)
+        self.image_label.setMinimumSize(1, 1)
+        self.image_label.installEventFilter(self)
 
-        self.scroll = QtWidgets.QScrollArea()
-        self.scroll.setWidgetResizable(True)
+        preview_panel = QtWidgets.QWidget()
+        preview_layout = QtWidgets.QVBoxLayout(preview_panel)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(6)
+
+        zoom_row = QtWidgets.QWidget()
+        zoom_row_layout = QtWidgets.QHBoxLayout(zoom_row)
+        zoom_row_layout.setContentsMargins(0, 0, 0, 0)
+        zoom_row_layout.setSpacing(6)
+
+        self.zoom_out_btn = QtWidgets.QPushButton("-")
+        self.zoom_out_btn.setFixedWidth(28)
+        self.zoom_in_btn = QtWidgets.QPushButton("+")
+        self.zoom_in_btn.setFixedWidth(28)
+        self.undo_btn = QtWidgets.QPushButton("<")
+        self.undo_btn.setFixedWidth(28)
+        self.redo_btn = QtWidgets.QPushButton(">")
+        self.redo_btn.setFixedWidth(28)
+        self.zoom_undo_divider = QtWidgets.QFrame()
+        self.zoom_undo_divider.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        self.zoom_undo_divider.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        self.zoom_fit_btn = QtWidgets.QPushButton("Fit")
+        self.zoom_actual_btn = QtWidgets.QPushButton("Actual Size")
+        self.split_preview_btn = QtWidgets.QPushButton("Split Preview")
+        self.split_preview_btn.setCheckable(True)
+        self.zoom_value_label = QtWidgets.QLabel("Fit")
+
+        zoom_row_layout.addWidget(self.undo_btn)
+        zoom_row_layout.addWidget(self.redo_btn)
+        zoom_row_layout.addSpacing(6)
+        zoom_row_layout.addWidget(self.zoom_undo_divider)
+        zoom_row_layout.addSpacing(6)
+        zoom_row_layout.addStretch(1)
+        zoom_row_layout.addWidget(self.split_preview_btn)
+        zoom_row_layout.addStretch(1)
+        zoom_row_layout.addWidget(self.zoom_out_btn)
+        zoom_row_layout.addWidget(self.zoom_in_btn)
+        zoom_row_layout.addWidget(self.zoom_fit_btn)
+        zoom_row_layout.addWidget(self.zoom_actual_btn)
+        zoom_row_layout.addWidget(self.zoom_value_label)
+
+        self.scroll = _PanScrollArea()
+        self.scroll.setWidgetResizable(False)
+        self.scroll.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.scroll.setWidget(self.image_label)
-        right_layout.addWidget(self.scroll, 1)
+        preview_layout.addWidget(zoom_row)
+        preview_layout.addWidget(self.scroll, 1)
+        right_layout.addWidget(preview_panel, 1)
 
         # Collapsible adjustments sidebar
         self.sidebar_container = QtWidgets.QWidget()
@@ -368,7 +536,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sidebar_toggle.setChecked(False)  # collapsed by default
         self.sidebar_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.sidebar_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
-        self.sidebar_toggle.setText("Adjustments")
+        self.sidebar_toggle.setText("Modifications")
         container_layout.addWidget(self.sidebar_toggle)
 
         self.adjust_sidebar = QtWidgets.QWidget()
@@ -415,6 +583,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preset_favorites_only.toggled.connect(self._on_favorites_only_toggled)
         self.strength_slider.valueChanged.connect(self._on_strength_change)
         self.sidebar_toggle.toggled.connect(self._set_adjustments_visible)
+        self.zoom_in_btn.clicked.connect(self._on_zoom_in)
+        self.zoom_out_btn.clicked.connect(self._on_zoom_out)
+        self.zoom_fit_btn.clicked.connect(self._on_zoom_fit)
+        self.zoom_actual_btn.clicked.connect(self._on_zoom_actual)
+        self.undo_btn.clicked.connect(self._on_undo)
+        self.redo_btn.clicked.connect(self._on_redo)
+        self.split_preview_btn.toggled.connect(self._on_split_preview_toggled)
+        self.scroll.pinchZoomRequested.connect(self._on_pinch_zoom)
+        self.scroll.wheelZoomRequested.connect(self._on_wheel_zoom)
 
         self.user_presets_browse_btn.clicked.connect(self._on_browse_user_presets_dir)
         self.user_presets_edit.editingFinished.connect(self._on_user_presets_dir_edited)
@@ -426,6 +603,67 @@ class MainWindow(QtWidgets.QMainWindow):
         self.batch_out_edit.editingFinished.connect(self._on_batch_paths_edited)
         self.batch_run_btn.clicked.connect(self._on_run_batch)
 
+        self.open_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Open, self)
+        self.open_shortcut.activated.connect(self._on_load)
+        self.save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, self)
+        self.save_shortcut.activated.connect(self._on_save)
+        self.undo_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Undo, self)
+        self.undo_shortcut.activated.connect(self._on_undo)
+        self.undo_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self.redo_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Redo, self)
+        self.redo_shortcut.activated.connect(self._on_redo)
+        self.redo_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self.undo_shortcut_meta = QtGui.QShortcut(QtGui.QKeySequence("Meta+Z"), self)
+        self.undo_shortcut_meta.activated.connect(self._on_undo)
+        self.undo_shortcut_meta.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self.redo_shortcut_meta = QtGui.QShortcut(QtGui.QKeySequence("Meta+Shift+Z"), self)
+        self.redo_shortcut_meta.activated.connect(self._on_redo)
+        self.redo_shortcut_meta.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+
+        self.zoom_in_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Meta++"), self)
+        self.zoom_in_shortcut.activated.connect(self._on_zoom_in)
+        self.zoom_in_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self.zoom_in_shortcut_alt = QtGui.QShortcut(QtGui.QKeySequence("Meta+="), self)
+        self.zoom_in_shortcut_alt.activated.connect(self._on_zoom_in)
+        self.zoom_in_shortcut_alt.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+
+        self.zoom_out_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Meta+-"), self)
+        self.zoom_out_shortcut.activated.connect(self._on_zoom_out)
+        self.zoom_out_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+
+        self.actual_size_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Meta+A"), self)
+        self.actual_size_shortcut.activated.connect(self._on_zoom_actual)
+        self.actual_size_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+
+        self.fit_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Meta+F"), self)
+        self.fit_shortcut.activated.connect(self._on_zoom_fit)
+        self.fit_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+
+        self.zoom_in_shortcut_ctrl = QtGui.QShortcut(QtGui.QKeySequence("Ctrl++"), self)
+        self.zoom_in_shortcut_ctrl.activated.connect(self._on_zoom_in)
+        self.zoom_in_shortcut_ctrl.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        self.zoom_in_shortcut_ctrl_alt = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+="), self)
+        self.zoom_in_shortcut_ctrl_alt.activated.connect(self._on_zoom_in)
+        self.zoom_in_shortcut_ctrl_alt.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+
+        self.zoom_out_shortcut_ctrl = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+-"), self)
+        self.zoom_out_shortcut_ctrl.activated.connect(self._on_zoom_out)
+        self.zoom_out_shortcut_ctrl.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+
+        self.actual_size_shortcut_ctrl = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+A"), self)
+        self.actual_size_shortcut_ctrl.activated.connect(self._on_zoom_actual)
+        self.actual_size_shortcut_ctrl.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+
+        self.fit_shortcut_ctrl = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+F"), self)
+        self.fit_shortcut_ctrl.activated.connect(self._on_zoom_fit)
+        self.fit_shortcut_ctrl.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+        open_hint = self.open_shortcut.key().toString(QtGui.QKeySequence.SequenceFormat.NativeText)
+        save_hint = self.save_shortcut.key().toString(QtGui.QKeySequence.SequenceFormat.NativeText)
+        self.load_btn.setToolTip(f"Load image ({open_hint})")
+        self.save_btn.setToolTip(f"Save image ({save_hint})")
+
+        self._history_last_state = self._make_history_state()
+
         self._apply_current()
 
         # Load user presets from configured folder on startup.
@@ -434,16 +672,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._batch_running = False
 
     def _on_load(self) -> None:
+        start_dir = self.last_open_image_dir.strip() if getattr(self, "last_open_image_dir", "") else ""
+        if not start_dir or not Path(start_dir).exists():
+            start_dir = str(Path.home())
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open Image",
-            str(Path.home()),
+            start_dir,
             "Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp);;All Files (*)",
         )
         if not fn:
             return
 
         path = Path(fn)
+        self.last_open_image_dir = str(path.parent)
+        self._settings.setValue("lastOpenImageDir", self.last_open_image_dir)
         pil_img = Image.open(path)
 
         # Keep full-res original; for preview, cap size for interactive speed
@@ -454,7 +697,10 @@ class MainWindow(QtWidgets.QMainWindow):
         preview_rgb8 = pil_to_rgb8(preview_pil)
 
         self._loaded = LoadedImage(path=path, original_rgb8=original_rgb8, preview_rgb8=preview_rgb8)
+        self._original_preview_pixmap = QtGui.QPixmap.fromImage(rgb8_to_qimage(preview_rgb8))
         self.save_btn.setEnabled(True)
+        self._zoom_mode = "fit"
+        self._zoom_factor = 1.0
         self._apply_current()
 
     def _on_save(self) -> None:
@@ -472,7 +718,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         out_path = Path(fn)
-        rgb8 = process_rgb8_stack(self._loaded.original_rgb8, [self._base_params, self._adjust_params], self._strength)
+        rgb8 = process_rgb8_stack(
+            self._loaded.original_rgb8,
+            [self._base_params, self._effective_adjust_params()],
+            self._strength,
+        )
         Image.fromarray(rgb8, mode="RGB").save(out_path)
 
     def _on_load_lut(self) -> None:
@@ -688,7 +938,7 @@ class MainWindow(QtWidgets.QMainWindow):
             files=files,
             output_dir=out_dir,
             base_params=self._base_params,
-            adjust_params=self._adjust_params,
+            adjust_params=self._effective_adjust_params(),
             strength=self._strength,
         )
         task.signals.progress.connect(self._on_batch_progress)
@@ -736,6 +986,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if i < 0 or i >= len(self._presets):
             return
         self._base_params = self._presets[i].params
+        self._record_history_if_changed()
         self._schedule_apply()
 
     def _on_preset_item_clicked(
@@ -743,8 +994,16 @@ class MainWindow(QtWidgets.QMainWindow):
         item: QtWidgets.QTreeWidgetItem,
         column: int,
     ) -> None:
-        # Toggle expansion when clicking on category names (not presets)
         idx = item.data(0, int(QtCore.Qt.ItemDataRole.UserRole))
+        if idx is not None and column == 1:
+            try:
+                i = int(idx)
+            except (TypeError, ValueError):
+                return
+            self._on_favorite_button_for_index(i)
+            return
+
+        # Toggle expansion when clicking on category names (not presets)
         if idx is None:  # This is a category item
             item.setExpanded(not item.isExpanded())
 
@@ -759,23 +1018,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._favorite_keys.add(key)
         self._save_favorites()
         self._rebuild_preset_tree(select_name=preset.name)
-
-    def _make_favorite_button(self, idx: int) -> QtWidgets.QPushButton:
-        is_fav = self._is_favorite_preset(self._presets[idx])
-        btn = QtWidgets.QPushButton("★" if is_fav else "☆")
-        btn.setObjectName("FavPresetButton")
-        btn.setCheckable(True)
-        btn.setChecked(is_fav)
-        btn.setToolTip("Toggle favorite")
-        btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-        btn.setFlat(True)
-        btn.setFixedSize(16, 16)
-        star_font = btn.font()
-        star_font.setPointSize(11)
-        star_font.setBold(True)
-        btn.setFont(star_font)
-        btn.clicked.connect(lambda _checked=False, i=idx: self._on_favorite_button_for_index(i))
-        return btn
 
     def _current_preset_index(self) -> int | None:
         item = self.preset_tree.currentItem()
@@ -806,7 +1048,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_favorites_only_toggled(self, checked: bool) -> None:
         current_idx = self._current_preset_index()
         current_name = self._presets[current_idx].name if current_idx is not None else None
+        if checked:
+            self._preset_tree_expand_state_before_favorites = self._capture_preset_tree_expand_state()
         self._rebuild_preset_tree(select_name=current_name)
+        if checked:
+            self._set_all_preset_categories_expanded(True)
+        elif self._preset_tree_expand_state_before_favorites is not None:
+            self._apply_preset_tree_expand_state(self._preset_tree_expand_state_before_favorites)
+            self._preset_tree_expand_state_before_favorites = None
+
+    def _capture_preset_tree_expand_state(self) -> dict[str, bool]:
+        state: dict[str, bool] = {}
+        for i in range(self.preset_tree.topLevelItemCount()):
+            item = self.preset_tree.topLevelItem(i)
+            state[item.text(0)] = item.isExpanded()
+        return state
+
+    def _apply_preset_tree_expand_state(self, state: dict[str, bool]) -> None:
+        for i in range(self.preset_tree.topLevelItemCount()):
+            item = self.preset_tree.topLevelItem(i)
+            name = item.text(0)
+            if name in state:
+                item.setExpanded(bool(state[name]))
+
+    def _set_all_preset_categories_expanded(self, expanded: bool) -> None:
+        for i in range(self.preset_tree.topLevelItemCount()):
+            self.preset_tree.topLevelItem(i).setExpanded(bool(expanded))
 
     def _select_preset_by_name(self, name: str) -> None:
         matches = [i for i, p in enumerate(self._presets) if p.name == name]
@@ -853,11 +1120,15 @@ class MainWindow(QtWidgets.QMainWindow):
             cat_item.setExpanded(False)
 
             for idx, preset in items:
-                child = QtWidgets.QTreeWidgetItem([preset.name, ""])
+                is_fav = self._is_favorite_preset(preset)
+                star = "★" if is_fav else "☆"
+                child = QtWidgets.QTreeWidgetItem([preset.name, star])
                 child.setData(0, int(QtCore.Qt.ItemDataRole.UserRole), idx)
                 child.setSizeHint(0, QtCore.QSize(0, 22))
+                child.setTextAlignment(1, int(QtCore.Qt.AlignmentFlag.AlignCenter))
+                star_color = QtGui.QColor("#f1c84a") if is_fav else QtGui.QColor("#a0a0a0")
+                child.setForeground(1, QtGui.QBrush(star_color))
                 cat_item.addChild(child)
-                self.preset_tree.setItemWidget(child, 1, self._make_favorite_button(idx))
 
         for cat in self._category_order:
             add_category(cat)
@@ -865,27 +1136,270 @@ class MainWindow(QtWidgets.QMainWindow):
         for cat in sorted(c for c in cats.keys() if c not in self._category_order):
             add_category(cat)
 
+        if favorites_only:
+            self._set_all_preset_categories_expanded(True)
+
         self._select_preset_by_name(select_name or "None")
 
     def _on_strength_change(self, value: int) -> None:
         self._strength = float(value) / 100.0
         self.strength_label.setText(f"Strength: {value}%")
+        self._record_history_if_changed()
         self._schedule_apply()
 
     def _schedule_apply(self) -> None:
         # Debounce rapid slider changes.
         self._apply_timer.start(25)
 
+    def _make_history_state(self) -> _HistoryState:
+        return _HistoryState(
+            base_params=self._base_params,
+            adjust_params=self._adjust_params,
+            strength=self._strength,
+        )
+
+    def _history_state_equal(self, a: _HistoryState, b: _HistoryState) -> bool:
+        return (
+            a.base_params == b.base_params
+            and a.adjust_params == b.adjust_params
+            and abs(a.strength - b.strength) < 1e-9
+        )
+
+    def _record_history_if_changed(self) -> None:
+        if self._history_restoring:
+            return
+        current = self._make_history_state()
+        if self._history_state_equal(current, self._history_last_state):
+            return
+        self._undo_stack.append(self._history_last_state)
+        if len(self._undo_stack) > 200:
+            self._undo_stack = self._undo_stack[-200:]
+        self._redo_stack.clear()
+        self._history_last_state = current
+
+    def _apply_history_state(self, state: _HistoryState) -> None:
+        self._history_restoring = True
+        self._base_params = state.base_params
+        self._adjust_params = state.adjust_params
+        self._strength = float(state.strength)
+        self.strength_slider.setValue(int(round(self._strength * 100.0)))
+        self.strength_label.setText(f"Strength: {int(round(self._strength * 100.0))}%")
+        self._sync_adjustment_widgets_from_state()
+        self._history_restoring = False
+        self._history_last_state = self._make_history_state()
+        self._schedule_apply()
+
+    def _on_undo(self) -> None:
+        if not self._undo_stack:
+            return
+        current = self._make_history_state()
+        state = self._undo_stack.pop()
+        self._redo_stack.append(current)
+        self._apply_history_state(state)
+
+    def _on_redo(self) -> None:
+        if not self._redo_stack:
+            return
+        current = self._make_history_state()
+        state = self._redo_stack.pop()
+        self._undo_stack.append(current)
+        self._apply_history_state(state)
+
+    def _fit_zoom_factor(self) -> float:
+        src = self._display_source_pixmap()
+        if not src or src.isNull():
+            return 1.0
+        viewport = self.scroll.viewport().size()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            return 1.0
+        bw = src.width()
+        bh = src.height()
+        if bw <= 0 or bh <= 0:
+            return 1.0
+        return max(0.01, min(float(viewport.width()) / float(bw), float(viewport.height()) / float(bh)))
+
+    def _set_zoom_label(self) -> None:
+        if self._zoom_mode == "fit":
+            pct = int(round(self._fit_zoom_factor() * 100.0))
+            self.zoom_value_label.setText(f"Fit ({pct}%)")
+        else:
+            pct = int(round(self._zoom_factor * 100.0))
+            self.zoom_value_label.setText(f"{pct}%")
+
+    def _on_zoom_in(self) -> None:
+        if not self._base_pixmap or self._base_pixmap.isNull():
+            return
+        self._apply_zoom(self._current_zoom_factor() * 1.25)
+
+    def _on_zoom_out(self) -> None:
+        if not self._base_pixmap or self._base_pixmap.isNull():
+            return
+        self._apply_zoom(self._current_zoom_factor() / 1.25)
+
+    def _on_zoom_fit(self) -> None:
+        self._zoom_mode = "fit"
+        self._refit_pixmap()
+
+    def _on_zoom_actual(self) -> None:
+        if not self._base_pixmap or self._base_pixmap.isNull():
+            return
+        self._apply_zoom(1.0)
+
+    def _on_pinch_zoom(self, factor: float, anchor_pos: object) -> None:
+        src = self._display_source_pixmap()
+        if not src or src.isNull():
+            return
+        anchor = anchor_pos if isinstance(anchor_pos, QtCore.QPoint) else None
+        self._apply_zoom(self._current_zoom_factor() * float(factor), anchor)
+
+    def _on_wheel_zoom(self, factor: float, anchor_pos: object) -> None:
+        src = self._display_source_pixmap()
+        if not src or src.isNull():
+            return
+        anchor = anchor_pos if isinstance(anchor_pos, QtCore.QPoint) else None
+        self._apply_zoom(self._current_zoom_factor() * float(factor), anchor)
+
+    def _on_split_preview_toggled(self, checked: bool) -> None:
+        self._split_preview_enabled = bool(checked)
+        self._dragging_split_divider = False
+        if not self._split_preview_enabled:
+            self.image_label.unsetCursor()
+        self._refit_pixmap()
+
+    def _update_split_divider_from_label_x(self, x: int) -> None:
+        w = max(1, self.image_label.width())
+        ratio = float(x) / float(w)
+        self._split_divider_ratio = max(0.02, min(0.98, ratio))
+        self._refit_pixmap()
+
+    def _current_zoom_factor(self) -> float:
+        if self._zoom_mode == "fit":
+            return self._fit_zoom_factor()
+        return max(0.05, min(16.0, float(self._zoom_factor)))
+
+    def _apply_zoom(self, new_factor: float, anchor_pos: QtCore.QPoint | None = None) -> None:
+        src = self._display_source_pixmap()
+        if not src or src.isNull():
+            return
+        viewport = self.scroll.viewport().size()
+        if viewport.width() <= 2 or viewport.height() <= 2:
+            return
+
+        old_factor = self._current_zoom_factor()
+        old_w = max(1, int(round(src.width() * old_factor)))
+        old_h = max(1, int(round(src.height() * old_factor)))
+
+        if anchor_pos is None:
+            anchor_pos = QtCore.QPoint(viewport.width() // 2, viewport.height() // 2)
+
+        hbar = self.scroll.horizontalScrollBar()
+        vbar = self.scroll.verticalScrollBar()
+        old_content_x = hbar.value() + anchor_pos.x()
+        old_content_y = vbar.value() + anchor_pos.y()
+        ratio_x = old_content_x / float(old_w)
+        ratio_y = old_content_y / float(old_h)
+
+        self._zoom_mode = "custom"
+        self._zoom_factor = max(0.05, min(16.0, float(new_factor)))
+        self._refit_pixmap()
+
+        new_factor_applied = self._current_zoom_factor()
+        src_after = self._display_source_pixmap()
+        if not src_after or src_after.isNull():
+            return
+        new_w = max(1, int(round(src_after.width() * new_factor_applied)))
+        new_h = max(1, int(round(src_after.height() * new_factor_applied)))
+        hbar.setValue(int(round(ratio_x * new_w - anchor_pos.x())))
+        vbar.setValue(int(round(ratio_y * new_h - anchor_pos.y())))
+
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         # Re-fit current pixmap to viewport
         self._refit_pixmap()
 
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() == int(QtCore.Qt.Key.Key_Space) and not event.isAutoRepeat():
+            self._space_pan_active = True
+            self.scroll.set_space_pan_enabled(True)
+            event.accept()
+            return
+        if (
+            event.key() == int(QtCore.Qt.Key.Key_M)
+            and not event.isAutoRepeat()
+            and event.modifiers() == QtCore.Qt.KeyboardModifier.NoModifier
+        ):
+            fw = QtWidgets.QApplication.focusWidget()
+            if not isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit)):
+                self.sidebar_toggle.setChecked(not self.sidebar_toggle.isChecked())
+                event.accept()
+                return
+        if not event.isAutoRepeat():
+            mods = event.modifiers()
+            has_cmd_ctrl = bool(mods & (QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.MetaModifier))
+            is_undo = (
+                event.key() == int(QtCore.Qt.Key.Key_Z)
+                and has_cmd_ctrl
+                and not bool(mods & QtCore.Qt.KeyboardModifier.ShiftModifier)
+            )
+            is_redo = has_cmd_ctrl and (
+                (event.key() == int(QtCore.Qt.Key.Key_Z) and bool(mods & QtCore.Qt.KeyboardModifier.ShiftModifier))
+                or event.key() == int(QtCore.Qt.Key.Key_Y)
+            )
+            if is_undo:
+                self._on_undo()
+                event.accept()
+                return
+            if is_redo:
+                self._on_redo()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if watched is self.image_label and self._split_preview_enabled:
+            if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+                me = event
+                if me.button() == QtCore.Qt.MouseButton.LeftButton and not self._space_pan_active:
+                    split_x = int(round(self.image_label.width() * self._split_divider_ratio))
+                    if abs(me.position().x() - split_x) <= 8:
+                        self._dragging_split_divider = True
+                        self.image_label.setCursor(QtCore.Qt.CursorShape.SplitHCursor)
+                        self._update_split_divider_from_label_x(int(me.position().x()))
+                        return True
+            elif event.type() == QtCore.QEvent.Type.MouseMove:
+                me = event
+                if self._dragging_split_divider:
+                    self._update_split_divider_from_label_x(int(me.position().x()))
+                    return True
+                split_x = int(round(self.image_label.width() * self._split_divider_ratio))
+                if abs(me.position().x() - split_x) <= 8:
+                    self.image_label.setCursor(QtCore.Qt.CursorShape.SplitHCursor)
+                else:
+                    self.image_label.unsetCursor()
+            elif event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+                me = event
+                if self._dragging_split_divider and me.button() == QtCore.Qt.MouseButton.LeftButton:
+                    self._dragging_split_divider = False
+                    self.image_label.unsetCursor()
+                    return True
+        return super().eventFilter(watched, event)
+
+    def keyReleaseEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() == int(QtCore.Qt.Key.Key_Space) and not event.isAutoRepeat():
+            self._space_pan_active = False
+            self.scroll.set_space_pan_enabled(False)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
     def _apply_current(self) -> None:
         if not self._loaded:
             self.image_label.setText("Load an image to begin")
             self.image_label.setPixmap(QtGui.QPixmap())
+            self.image_label.adjustSize()
             self._base_pixmap = None
+            self._original_preview_pixmap = None
+            self._set_zoom_label()
             return
 
         self._render_generation += 1
@@ -895,7 +1409,7 @@ class MainWindow(QtWidgets.QMainWindow):
             generation=gen,
             preview_rgb8=self._loaded.preview_rgb8,
             base_params=self._base_params,
-            adjust_params=self._adjust_params,
+            adjust_params=self._effective_adjust_params(),
             strength=self._strength,
         )
         task.signals.finished.connect(self._on_render_finished)
@@ -1144,6 +1658,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._adjust_params = replace(self._adjust_params, curve_points_g=pts)
         elif channel == "Blue":
             self._adjust_params = replace(self._adjust_params, curve_points_b=pts)
+        self._record_history_if_changed()
         self._schedule_apply()
 
     def _on_curve_channel_changed(self) -> None:
@@ -1238,22 +1753,12 @@ class MainWindow(QtWidgets.QMainWindow):
             white = 1.0
             gamma = 1.0
 
-        curve_points = None
-        curve_r = None
-        curve_g = None
-        curve_b = None
-        if getattr(self, "curves_group", None) and self.curves_group.isChecked():
-            # Keep existing stored curves; the editor writes the selected channel via _on_curve_changed.
-            curve_points = self._adjust_params.curve_points
-            curve_r = self._adjust_params.curve_points_r
-            curve_g = self._adjust_params.curve_points_g
-            curve_b = self._adjust_params.curve_points_b
-        else:
-            # Disabled -> clear curves
-            curve_points = None
-            curve_r = None
-            curve_g = None
-            curve_b = None
+        # Always preserve stored curves; runtime application is controlled by
+        # _effective_adjust_params() based on curves_group checked state.
+        curve_points = self._adjust_params.curve_points
+        curve_r = self._adjust_params.curve_points_r
+        curve_g = self._adjust_params.curve_points_g
+        curve_b = self._adjust_params.curve_points_b
 
         self._adjust_params = replace(
             self._adjust_params,
@@ -1283,7 +1788,20 @@ class MainWindow(QtWidgets.QMainWindow):
             curve_points_g=curve_g,
             curve_points_b=curve_b,
         )
+        self._record_history_if_changed()
         self._schedule_apply()
+
+    def _effective_adjust_params(self) -> FilterParams:
+        adjust = self._adjust_params
+        if not getattr(self, "curves_group", None) or self.curves_group.isChecked():
+            return adjust
+        return replace(
+            adjust,
+            curve_points=None,
+            curve_points_r=None,
+            curve_points_g=None,
+            curve_points_b=None,
+        )
 
     def _sync_adjustment_widgets_from_state(self) -> None:
         # Block signals to avoid feedback loop.
@@ -1418,6 +1936,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_color_button(self.split_shadows_btn, c)
         if not self.split_group.isChecked():
             self.split_group.setChecked(True)
+        self._record_history_if_changed()
         self._schedule_apply()
 
     def _pick_split_highlights(self) -> None:
@@ -1429,6 +1948,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_color_button(self.split_highlights_btn, c)
         if not self.split_group.isChecked():
             self.split_group.setChecked(True)
+        self._record_history_if_changed()
         self._schedule_apply()
 
     def _make_slider(self, min_v: int, max_v: int, value: int, suffix: str = "") -> tuple[QtWidgets.QSlider, QtWidgets.QLabel]:
@@ -1585,19 +2105,69 @@ class MainWindow(QtWidgets.QMainWindow):
             lut=base.lut if base.lut is not None else adjust.lut,
         )
 
-    def _refit_pixmap(self) -> None:
+    def _display_source_pixmap(self) -> QtGui.QPixmap | None:
         if not self._base_pixmap or self._base_pixmap.isNull():
+            return None
+        if self._split_preview_enabled:
+            split = self._make_split_preview_pixmap()
+            if split is not None and not split.isNull():
+                return split
+        return self._base_pixmap
+
+    def _make_split_preview_pixmap(self) -> QtGui.QPixmap | None:
+        if not self._base_pixmap or self._base_pixmap.isNull():
+            return None
+        if not self._original_preview_pixmap or self._original_preview_pixmap.isNull():
+            return None
+
+        processed = self._base_pixmap
+        original = self._original_preview_pixmap
+        if original.size() != processed.size():
+            original = original.scaled(
+                processed.size(),
+                QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+
+        out = QtGui.QPixmap(processed.size())
+        out.fill(QtCore.Qt.GlobalColor.black)
+        split_x = int(round(processed.width() * self._split_divider_ratio))
+
+        painter = QtGui.QPainter(out)
+        painter.drawPixmap(0, 0, original)
+        painter.setClipRect(split_x, 0, processed.width() - split_x, processed.height())
+        painter.drawPixmap(0, 0, processed)
+        painter.setClipping(False)
+        painter.setPen(QtGui.QPen(QtGui.QColor(240, 240, 240, 220), 1))
+        painter.drawLine(split_x, 0, split_x, processed.height())
+        painter.end()
+
+        return out
+
+    def _refit_pixmap(self) -> None:
+        src = self._display_source_pixmap()
+        if not src or src.isNull():
             return
-        # Fit to scroll viewport width while keeping aspect ratio
         viewport = self.scroll.viewport().size()
         if viewport.width() <= 10 or viewport.height() <= 10:
             return
-        scaled = self._base_pixmap.scaled(
-            viewport,
+
+        if self._zoom_mode == "fit":
+            factor = self._fit_zoom_factor()
+        else:
+            factor = max(0.05, min(16.0, float(self._zoom_factor)))
+
+        target_w = max(1, int(round(src.width() * factor)))
+        target_h = max(1, int(round(src.height() * factor)))
+        scaled = src.scaled(
+            QtCore.QSize(target_w, target_h),
             QtCore.Qt.AspectRatioMode.KeepAspectRatio,
             QtCore.Qt.TransformationMode.SmoothTransformation,
         )
+        self.image_label.setText("")
         self.image_label.setPixmap(scaled)
+        self.image_label.setFixedSize(scaled.size())
+        self._set_zoom_label()
 
 
 def main() -> int:
