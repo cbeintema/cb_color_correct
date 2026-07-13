@@ -9,6 +9,11 @@ from PIL import Image
 from .lut import CubeLut, apply_lut
 
 try:
+    from scipy.ndimage import gaussian_filter
+except ImportError:
+    gaussian_filter = None
+
+try:
     import pilgram2 as pilgram
 except Exception:
     pilgram = None
@@ -305,6 +310,80 @@ def apply_vignette(rgb01: ArrayF, amount: float, midpoint: float = 0.5) -> Array
     return rgb01 * factor[..., None]
 
 
+def apply_bloom(rgb01: ArrayF, bloom: float) -> ArrayF:
+    """
+    Apply bloom effect: extract bright areas, blur them, and add back to create glow.
+
+    Args:
+        rgb01: Input image in float32 [0, 1] range, shape (H, W, 3)
+        bloom: Bloom strength in [0, 1] range
+
+    Returns:
+        Image with bloom effect applied
+    """
+    b = float(bloom)
+    if b <= 0.0:
+        return rgb01
+
+    # Extract bright areas using luminance-based power curve for smooth falloff
+    luma = luminance(rgb01)
+    power = 4.0 - b * 2.0  # Higher power = more selective extraction
+    brightness_mask = np.power(np.clip(luma, 0.0, 1.0), power)
+    bright_rgb = rgb01 * brightness_mask[..., None]
+
+    # Apply Gaussian blur to create glow
+    sigma = 15.0 + b * 15.0  # Adaptive blur radius (15-30 pixels)
+
+    if gaussian_filter is not None:
+        # High-quality Gaussian blur using scipy
+        bloomed = np.zeros_like(bright_rgb)
+        for i in range(3):  # Process each channel
+            bloomed[..., i] = gaussian_filter(bright_rgb[..., i], sigma=sigma, mode='reflect')
+    else:
+        # Fallback: simple box blur approximation
+        kernel_size = int(sigma * 2) + 1
+        bloomed = _box_blur(bright_rgb, kernel_size)
+
+    # Additive blend for glow effect
+    blend_strength = b * 1.5
+    return rgb01 + bloomed * blend_strength
+
+
+def _box_blur(rgb01: ArrayF, kernel_size: int) -> ArrayF:
+    """Simple box blur fallback when scipy is not available."""
+    if kernel_size < 3:
+        return rgb01
+
+    # Ensure odd kernel size
+    k = kernel_size if kernel_size % 2 == 1 else kernel_size + 1
+    radius = k // 2
+
+    h, w, c = rgb01.shape
+    result = np.zeros_like(rgb01)
+
+    # Separable box blur using cumulative sum for efficiency
+    for ch in range(c):
+        channel = rgb01[..., ch]
+
+        # Horizontal pass
+        padded = np.pad(channel, ((0, 0), (radius, radius)), mode='reflect')
+        cumsum = np.concatenate(
+            [np.zeros((h, 1), dtype=padded.dtype), np.cumsum(padded, axis=1)],
+            axis=1,
+        )
+        h_blurred = (cumsum[:, k:] - cumsum[:, :-k]) / k
+
+        # Vertical pass
+        padded = np.pad(h_blurred, ((radius, radius), (0, 0)), mode='reflect')
+        cumsum = np.concatenate(
+            [np.zeros((1, w), dtype=padded.dtype), np.cumsum(padded, axis=0)],
+            axis=0,
+        )
+        result[..., ch] = (cumsum[k:, :] - cumsum[:-k, :]) / k
+
+    return result
+
+
 def apply_split_tone(
     rgb01: ArrayF,
     shadows_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0),
@@ -349,6 +428,7 @@ class FilterParams:
     dehaze: float = 0.0
     vignette: float = 0.0
     vignette_midpoint: float = 0.5
+    bloom: float = 0.0
     pilgram_filter: str | None = None
     levels_black: float = 0.0
     levels_white: float = 1.0
@@ -407,6 +487,8 @@ def apply_params(rgb01: ArrayF, params: FilterParams) -> ArrayF:
         )
     if params.lut is not None:
         out = apply_lut(out, params.lut)
+    if params.bloom:
+        out = apply_bloom(out, params.bloom)
     if params.vignette:
         out = apply_vignette(out, params.vignette, params.vignette_midpoint)
     if params.pilgram_filter:

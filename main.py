@@ -1544,11 +1544,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dehaze_slider, self.dehaze_value = self._make_slider(-100, 100, 0, suffix="")
         self.vignette_slider, self.vignette_value = self._make_slider(-100, 100, 0, suffix="")
         self.vignette_mid_slider, self.vignette_mid_value = self._make_slider(0, 100, 50, suffix="")
+        self.bloom_slider, self.bloom_value = self._make_slider(0, 100, 0, suffix="")
 
         fx_form.addRow("Clarity", self._hbox(self.clarity_slider, self.clarity_value))
         fx_form.addRow("Dehaze", self._hbox(self.dehaze_slider, self.dehaze_value))
         fx_form.addRow("Vignette", self._hbox(self.vignette_slider, self.vignette_value))
         fx_form.addRow("Vig Mid", self._hbox(self.vignette_mid_slider, self.vignette_mid_value))
+        fx_form.addRow("Bloom", self._hbox(self.bloom_slider, self.bloom_value))
 
         # Levels group
         self.levels_group = QtWidgets.QGroupBox("Levels")
@@ -1632,6 +1634,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dehaze_slider.valueChanged.connect(self._on_adjust_change)
         self.vignette_slider.valueChanged.connect(self._on_adjust_change)
         self.vignette_mid_slider.valueChanged.connect(self._on_adjust_change)
+        self.bloom_slider.valueChanged.connect(self._on_adjust_change)
         self.black_slider.valueChanged.connect(self._on_adjust_change)
         self.white_slider.valueChanged.connect(self._on_adjust_change)
         self.gamma_slider.valueChanged.connect(self._on_adjust_change)
@@ -1695,6 +1698,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dehaze = self.dehaze_slider.value() / 100.0
         vignette = self.vignette_slider.value() / 100.0
         vignette_mid = self.vignette_mid_slider.value() / 100.0
+        bloom = self.bloom_slider.value() / 100.0
 
         black = self.black_slider.value() / 100.0
         white = self.white_slider.value() / 100.0
@@ -1719,6 +1723,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dehaze_value.setText(f"{dehaze:.2f}")
         self.vignette_value.setText(f"{vignette:.2f}")
         self.vignette_mid_value.setText(f"{vignette_mid:.2f}")
+        self.bloom_value.setText(f"{bloom:.2f}")
         self.black_value.setText(f"{black:.2f}")
         self.white_value.setText(f"{white:.2f}")
         self.gamma_value.setText(f"{gamma:.2f}")
@@ -1748,6 +1753,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dehaze = 0.0
             vignette = 0.0
             vignette_mid = 0.5
+            bloom = 0.0
         if not self.levels_group.isChecked():
             black = 0.0
             white = 1.0
@@ -1780,6 +1786,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dehaze=dehaze,
             vignette=vignette,
             vignette_midpoint=vignette_mid,
+            bloom=bloom,
             levels_black=black,
             levels_white=white,
             levels_gamma=gamma,
@@ -1824,6 +1831,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.dehaze_slider,
             self.vignette_slider,
             self.vignette_mid_slider,
+            self.bloom_slider,
             self.black_slider,
             self.white_slider,
             self.gamma_slider,
@@ -1852,6 +1860,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dehaze_slider.setValue(int(round(self._adjust_params.dehaze * 100.0)))
         self.vignette_slider.setValue(int(round(self._adjust_params.vignette * 100.0)))
         self.vignette_mid_slider.setValue(int(round(self._adjust_params.vignette_midpoint * 100.0)))
+        self.bloom_slider.setValue(int(round(self._adjust_params.bloom * 100.0)))
 
         self.black_slider.setValue(int(round(self._adjust_params.levels_black * 100.0)))
         self.white_slider.setValue(int(round(self._adjust_params.levels_white * 100.0)))
@@ -1862,7 +1871,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sh_group.setChecked(bool(self._adjust_params.shadows or self._adjust_params.highlights))
         self.split_group.setChecked(bool(self._adjust_params.split_amount))
         self.effects_group.setChecked(
-            bool(self._adjust_params.clarity or self._adjust_params.dehaze or self._adjust_params.vignette)
+            bool(self._adjust_params.clarity or self._adjust_params.dehaze or self._adjust_params.vignette or self._adjust_params.bloom)
         )
 
         self._sync_split_buttons_from_state()
