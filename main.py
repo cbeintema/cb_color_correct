@@ -4,7 +4,11 @@ import sys
 from dataclasses import dataclass
 from dataclasses import replace
 import json
+import shlex
+import shutil
+import tempfile
 import traceback
+import urllib.request
 from typing import Iterable
 from pathlib import Path
 
@@ -15,12 +19,40 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from cb_color_correct.censor import CensorCircle, apply_censor_blur
 from cb_color_correct.filters import FilterPreset, presets
 from cb_color_correct.image_ops import FilterParams, process_rgb8_stack
+from cb_color_correct.image_metadata import save_metadata_free_rgb8
 from cb_color_correct.lut import CubeParseError, load_cube
 from cb_color_correct.curve_editor import CurveEditor
 from cb_color_correct.theme import apply_ableton_theme
+from cb_color_correct.upscale import (
+    ComfyUILaunchWatcher,
+    ComfyUpscaleWorker,
+    UpscalePackagePaths,
+    UpscaleSettings,
+    build_upscale_package_paths,
+    create_upscale_zip,
+)
 
 
 DEFAULT_CENSOR_BLUR_RADIUS = 24
+
+
+def _default_comfyui_launch_settings() -> tuple[str, str, str]:
+    comfy_root = Path.home() / "Documents" / "ComfyUI"
+    python_path = comfy_root / ".venv" / "Scripts" / "python.exe"
+    main_path = Path.home() / "AppData" / "Local" / "Programs" / "ComfyUI" / "resources" / "ComfyUI" / "main.py"
+    user_path = comfy_root / "user"
+    model_paths = comfy_root / "extra_model_paths.yaml"
+
+    extra_args: list[str] = []
+    if user_path.is_dir():
+        extra_args.extend(["--user-directory", f'"{user_path}"'])
+    if model_paths.is_file():
+        extra_args.extend(["--extra-model-paths-config", f'"{model_paths}"'])
+    return (
+        str(python_path) if python_path.is_file() else "",
+        str(main_path) if main_path.is_file() else "",
+        " ".join(extra_args),
+    )
 
 
 def validate_packages() -> None:
@@ -450,6 +482,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # Single worker keeps UI consistent (latest result wins anyway).
         self._thread_pool.setMaxThreadCount(1)
         self._render_generation = 0
+        self._upscale_worker: ComfyUpscaleWorker | None = None
+        self._comfyui_launch_watcher: ComfyUILaunchWatcher | None = None
+        self._upscale_source_temp: Path | None = None
+        self._upscale_output_auto = True
+        self._upscale_cancel_requested = False
+        self._upscale_comfyui_stopping = False
+        self._upscale_package_mode = False
+        self._upscale_package_censored_temp: Path | None = None
+        self._upscale_package_paths: UpscalePackagePaths | None = None
 
         self._presets = presets()
         self._category_order = [
@@ -491,6 +532,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # User presets folder
         self._settings = QtCore.QSettings("CB", "CB Color Correct")
+        stored_censor_blur = self._settings.value("censor/blurRadius", DEFAULT_CENSOR_BLUR_RADIUS)
+        try:
+            self._censor_blur_radius = max(1, min(100, int(str(stored_censor_blur))))
+        except (TypeError, ValueError):
+            self._censor_blur_radius = DEFAULT_CENSOR_BLUR_RADIUS
         self.user_presets_dir = str(self._settings.value("userPresetsDir", ""))
         self.last_open_image_dir = str(self._settings.value("lastOpenImageDir", ""))
         try:
@@ -608,9 +654,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(left)
 
-        # Right side: preview + adjustments sidebar
-        right = QtWidgets.QWidget()
-        right_layout = QtWidgets.QHBoxLayout(right)
+        # Right side: editor and upscale tabs
+        right_tabs = QtWidgets.QTabWidget()
+        editor_tab = QtWidgets.QWidget()
+        right_layout = QtWidgets.QHBoxLayout(editor_tab)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
 
@@ -669,7 +716,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.censor_blur_label = QtWidgets.QLabel("Blur")
         self.censor_blur_spin = QtWidgets.QSpinBox()
         self.censor_blur_spin.setRange(1, 100)
-        self.censor_blur_spin.setValue(DEFAULT_CENSOR_BLUR_RADIUS)
+        self.censor_blur_spin.setValue(self._censor_blur_radius)
         self.censor_blur_spin.setSuffix(" px")
         self.censor_blur_spin.setFixedWidth(82)
         self.censor_remove_btn = QtWidgets.QPushButton("Remove Last")
@@ -736,7 +783,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._set_adjustments_visible(False)
 
-        layout.addWidget(right, 1)
+        right_tabs.addTab(editor_tab, "Edit")
+        upscale_tab = QtWidgets.QWidget()
+        self._build_upscale_tab(upscale_tab)
+        right_tabs.addTab(upscale_tab, "Upscale")
+        layout.addWidget(right_tabs, 1)
 
         # Wire up
         self.load_btn.clicked.connect(self._on_load)
@@ -875,14 +926,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._loaded = LoadedImage(path=path, original_rgb8=original_rgb8, preview_rgb8=preview_rgb8)
         self._original_preview_pixmap = QtGui.QPixmap.fromImage(rgb8_to_qimage(preview_rgb8))
         self._censor_circles = ()
-        self._censor_blur_radius = DEFAULT_CENSOR_BLUR_RADIUS
-        self.censor_blur_spin.blockSignals(True)
-        self.censor_blur_spin.setValue(DEFAULT_CENSOR_BLUR_RADIUS)
-        self.censor_blur_spin.blockSignals(False)
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._history_last_state = self._make_history_state()
         self._update_censor_controls()
+        self._update_upscale_source_label()
+        if self._upscale_output_auto:
+            self._set_default_upscale_output_path()
+        self._update_upscale_controls()
         self.save_btn.setEnabled(True)
         self._zoom_mode = "fit"
         self._zoom_factor = 1.0
@@ -892,7 +943,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._loaded:
             return
 
-        default_name = self._loaded.path.with_name(self._loaded.path.stem + "_filtered" + self._loaded.path.suffix)
+        save_suffix = "_censored" if self._censor_circles else "_filtered"
+        default_name = self._loaded.path.with_name(self._loaded.path.stem + save_suffix + self._loaded.path.suffix)
         fn, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Image As",
@@ -903,13 +955,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         out_path = Path(fn)
-        rgb8 = process_rgb8_stack(
-            self._loaded.original_rgb8,
-            [self._base_params, self._effective_adjust_params()],
-            self._strength,
-        )
-        rgb8 = apply_censor_blur(rgb8, self._censor_circles, self._censor_blur_radius)
-        Image.fromarray(rgb8, mode="RGB").save(out_path)
+        rgb8 = self._render_censored_output_rgb8()
+        save_metadata_free_rgb8(rgb8, out_path)
 
     def _on_censor_toggled(self, checked: bool) -> None:
         self._censor_enabled = bool(checked)
@@ -929,6 +976,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_censor_blur_changed(self, value: int) -> None:
         self._censor_blur_radius = int(value)
+        self._settings.setValue("censor/blurRadius", self._censor_blur_radius)
+        self._settings.sync()
         self._record_history_if_changed()
         self._schedule_apply()
 
@@ -1682,6 +1731,714 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # Keep it quiet in normal operation; show a dialog only for current render failure.
         QtWidgets.QMessageBox.critical(self, "Render Error", err)
+
+    def _build_upscale_tab(self, parent: QtWidgets.QWidget) -> None:
+        layout = QtWidgets.QVBoxLayout(parent)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        hint = QtWidgets.QLabel(
+            "Upscale the currently loaded image after its color adjustments. "
+            "Censor regions are excluded from the upscale source, and the original file is never modified."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hintLabel")
+        layout.addWidget(hint)
+        self.upscale_source_label = QtWidgets.QLabel("Source: No image loaded")
+        self.upscale_source_label.setObjectName("sourceLabel")
+        layout.addWidget(self.upscale_source_label)
+
+        connection_group = QtWidgets.QGroupBox("ComfyUI")
+        connection_form = QtWidgets.QFormLayout(connection_group)
+        connection_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.upscale_url_edit = QtWidgets.QLineEdit(
+            str(self._settings.value("upscale/comfyUrl", "http://127.0.0.1:8000"))
+        )
+        self.upscale_url_edit.setPlaceholderText("http://127.0.0.1:8000")
+        self.upscale_engine_combo = QtWidgets.QComboBox()
+        self.upscale_engine_combo.addItems(["NVIDIA RTX", "SeedVR"])
+        connection_form.addRow("URL", self.upscale_url_edit)
+        connection_form.addRow("Engine", self.upscale_engine_combo)
+        self.upscale_connection_group = connection_group
+        layout.addWidget(connection_group)
+
+        rtx_group = QtWidgets.QGroupBox("NVIDIA RTX Settings")
+        rtx_form = QtWidgets.QFormLayout(rtx_group)
+        self.upscale_rtx_resize_type_combo = QtWidgets.QComboBox()
+        self.upscale_rtx_resize_type_combo.addItems(["scale by multiplier", "resize to width and height"])
+        self.upscale_rtx_scale_spin = QtWidgets.QDoubleSpinBox()
+        self.upscale_rtx_scale_spin.setRange(1.0, 8.0)
+        self.upscale_rtx_scale_spin.setSingleStep(0.5)
+        self.upscale_rtx_scale_spin.setDecimals(1)
+        self.upscale_rtx_scale_spin.setValue(2.0)
+        self.upscale_rtx_scale_spin.setSuffix("x")
+        self.upscale_rtx_width_spin = QtWidgets.QSpinBox()
+        self.upscale_rtx_width_spin.setRange(64, 16384)
+        self.upscale_rtx_width_spin.setSingleStep(64)
+        self.upscale_rtx_width_spin.setValue(3840)
+        self.upscale_rtx_height_spin = QtWidgets.QSpinBox()
+        self.upscale_rtx_height_spin.setRange(64, 16384)
+        self.upscale_rtx_height_spin.setSingleStep(64)
+        self.upscale_rtx_height_spin.setValue(2160)
+        self.upscale_rtx_quality_combo = QtWidgets.QComboBox()
+        self.upscale_rtx_quality_combo.addItems(["ULTRA", "HIGH", "MEDIUM", "LOW"])
+
+        rtx_wh_row = QtWidgets.QWidget()
+        rtx_wh_layout = QtWidgets.QHBoxLayout(rtx_wh_row)
+        rtx_wh_layout.setContentsMargins(0, 0, 0, 0)
+        rtx_wh_layout.addWidget(self.upscale_rtx_width_spin)
+        rtx_wh_layout.addWidget(QtWidgets.QLabel("x"))
+        rtx_wh_layout.addWidget(self.upscale_rtx_height_spin)
+        self.upscale_rtx_scale_label = QtWidgets.QLabel("Scale")
+        self.upscale_rtx_wh_label = QtWidgets.QLabel("Width x Height")
+        rtx_form.addRow("Resize Type", self.upscale_rtx_resize_type_combo)
+        rtx_form.addRow(self.upscale_rtx_scale_label, self.upscale_rtx_scale_spin)
+        rtx_form.addRow(self.upscale_rtx_wh_label, rtx_wh_row)
+        rtx_form.addRow("Quality", self.upscale_rtx_quality_combo)
+        layout.addWidget(rtx_group)
+
+        seedvr_group = QtWidgets.QGroupBox("SeedVR Settings")
+        seedvr_form = QtWidgets.QFormLayout(seedvr_group)
+        self.upscale_seedvr_resolution_spin = QtWidgets.QSpinBox()
+        self.upscale_seedvr_resolution_spin.setRange(256, 16384)
+        self.upscale_seedvr_resolution_spin.setSingleStep(256)
+        self.upscale_seedvr_resolution_spin.setValue(4096)
+        self.upscale_seedvr_max_resolution_spin = QtWidgets.QSpinBox()
+        self.upscale_seedvr_max_resolution_spin.setRange(256, 16384)
+        self.upscale_seedvr_max_resolution_spin.setSingleStep(256)
+        self.upscale_seedvr_max_resolution_spin.setValue(4096)
+        self.upscale_seedvr_seed_spin = QtWidgets.QSpinBox()
+        self.upscale_seedvr_seed_spin.setRange(0, 2147483647)
+        self.upscale_seedvr_seed_spin.setValue(42)
+        seedvr_form.addRow("Resolution", self.upscale_seedvr_resolution_spin)
+        seedvr_form.addRow("Max Resolution", self.upscale_seedvr_max_resolution_spin)
+        seedvr_form.addRow("Seed", self.upscale_seedvr_seed_spin)
+        layout.addWidget(seedvr_group)
+
+        launch_group = QtWidgets.QGroupBox("ComfyUI Launch")
+        launch_form = QtWidgets.QFormLayout(launch_group)
+        default_comfyui_python, default_comfyui_main, default_comfyui_extra_args = _default_comfyui_launch_settings()
+        self.upscale_python_edit = QtWidgets.QLineEdit(default_comfyui_python)
+        self.upscale_python_edit.setPlaceholderText("Optional path to ComfyUI venv python.exe")
+        self.upscale_python_browse_btn = QtWidgets.QPushButton("Browse")
+        python_row = QtWidgets.QWidget()
+        python_layout = QtWidgets.QHBoxLayout(python_row)
+        python_layout.setContentsMargins(0, 0, 0, 0)
+        python_layout.addWidget(self.upscale_python_edit, 1)
+        python_layout.addWidget(self.upscale_python_browse_btn)
+        self.upscale_main_edit = QtWidgets.QLineEdit(default_comfyui_main)
+        self.upscale_main_edit.setPlaceholderText("Optional path to ComfyUI main.py")
+        self.upscale_main_browse_btn = QtWidgets.QPushButton("Browse")
+        main_row = QtWidgets.QWidget()
+        main_layout = QtWidgets.QHBoxLayout(main_row)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(self.upscale_main_edit, 1)
+        main_layout.addWidget(self.upscale_main_browse_btn)
+        self.upscale_extra_args_edit = QtWidgets.QLineEdit(default_comfyui_extra_args)
+        self.upscale_extra_args_edit.setPlaceholderText("Optional extra launch args")
+        launch_form.addRow("Python Exe", python_row)
+        launch_form.addRow("ComfyUI main.py", main_row)
+        launch_form.addRow("Extra Args", self.upscale_extra_args_edit)
+        layout.addWidget(launch_group)
+        self.upscale_launch_group = launch_group
+
+        output_group = QtWidgets.QGroupBox("Output")
+        output_form = QtWidgets.QFormLayout(output_group)
+        self.upscale_output_edit = QtWidgets.QLineEdit()
+        self.upscale_output_edit.setPlaceholderText("Defaults to <source>_upscaled.png")
+        self.upscale_output_browse_btn = QtWidgets.QPushButton("Browse")
+        output_row = QtWidgets.QWidget()
+        output_layout = QtWidgets.QHBoxLayout(output_row)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.addWidget(self.upscale_output_edit, 1)
+        output_layout.addWidget(self.upscale_output_browse_btn)
+        output_form.addRow("Output File", output_row)
+        layout.addWidget(output_group)
+        self.upscale_output_group = output_group
+
+        action_row = QtWidgets.QHBoxLayout()
+        self.upscale_launch_btn = QtWidgets.QPushButton("Launch ComfyUI")
+        self.upscale_stop_btn = QtWidgets.QPushButton("Stop ComfyUI")
+        self.upscale_stop_btn.setObjectName("stopButton")
+        self.upscale_cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.upscale_run_btn = QtWidgets.QPushButton("Upscale Current Image")
+        self.upscale_run_btn.setObjectName("upscaleButton")
+        self.upscale_package_btn = QtWidgets.QPushButton("Upscale and Zip")
+        self.upscale_package_btn.setObjectName("upscalePackageButton")
+        self.upscale_package_btn.setToolTip(
+            "Create a censored preview and a ZIP containing the uncensored upscale"
+        )
+        action_row.addWidget(self.upscale_launch_btn)
+        action_row.addWidget(self.upscale_stop_btn)
+        action_row.addStretch(1)
+        action_row.addWidget(self.upscale_cancel_btn)
+        action_row.addWidget(self.upscale_run_btn)
+        action_row.addWidget(self.upscale_package_btn)
+        layout.addLayout(action_row)
+
+        self.upscale_progress = QtWidgets.QProgressBar()
+        self.upscale_progress.setRange(0, 1)
+        self.upscale_progress.setValue(0)
+        self.upscale_status_label = QtWidgets.QLabel("Load an image to begin")
+        self.upscale_log = QtWidgets.QPlainTextEdit()
+        self.upscale_log.setReadOnly(True)
+        self.upscale_log.setMinimumHeight(100)
+        layout.addWidget(self.upscale_progress)
+        layout.addWidget(self.upscale_status_label)
+        layout.addWidget(self.upscale_log, 1)
+
+        self.upscale_rtx_group = rtx_group
+        self.upscale_seedvr_group = seedvr_group
+        self.upscale_rtx_resize_type_combo.currentTextChanged.connect(self._on_upscale_resize_type_changed)
+        self.upscale_engine_combo.currentTextChanged.connect(self._on_upscale_engine_changed)
+        self.upscale_output_edit.textEdited.connect(lambda: self._set_upscale_output_auto(False))
+        self.upscale_python_browse_btn.clicked.connect(self._on_browse_upscale_python)
+        self.upscale_main_browse_btn.clicked.connect(self._on_browse_upscale_main)
+        self.upscale_output_browse_btn.clicked.connect(self._on_browse_upscale_output)
+        self.upscale_launch_btn.clicked.connect(self._on_launch_comfyui)
+        self.upscale_stop_btn.clicked.connect(self._on_stop_comfyui)
+        self.upscale_cancel_btn.clicked.connect(self._on_cancel_upscale)
+        self.upscale_run_btn.clicked.connect(self._on_run_upscale)
+        self.upscale_package_btn.clicked.connect(self._on_upscale_and_zip)
+
+        self._on_upscale_resize_type_changed(self.upscale_rtx_resize_type_combo.currentText())
+        self._on_upscale_engine_changed(self.upscale_engine_combo.currentText())
+        self._apply_stored_upscale_settings()
+        self._update_upscale_controls()
+
+    def _apply_stored_upscale_settings(self) -> None:
+        settings = self._settings
+
+        def read_text(key: str, widget: QtWidgets.QLineEdit) -> None:
+            value = settings.value(key, "")
+            if value:
+                widget.setText(str(value))
+
+        read_text("upscale/comfyUrl", self.upscale_url_edit)
+        read_text("upscale/comfyuiPython", self.upscale_python_edit)
+        read_text("upscale/comfyuiMain", self.upscale_main_edit)
+        read_text("upscale/comfyuiExtraArgs", self.upscale_extra_args_edit)
+
+        engine = settings.value("upscale/engine", "")
+        if engine:
+            self.upscale_engine_combo.setCurrentText(str(engine))
+        resize_type = settings.value("upscale/rtxResizeType", "")
+        if resize_type:
+            self.upscale_rtx_resize_type_combo.setCurrentText(str(resize_type))
+        scale = settings.value("upscale/rtxScale", None)
+        if scale is not None:
+            self.upscale_rtx_scale_spin.setValue(float(str(scale)))
+        width = settings.value("upscale/rtxWidth", None)
+        if width is not None:
+            self.upscale_rtx_width_spin.setValue(int(str(width)))
+        height = settings.value("upscale/rtxHeight", None)
+        if height is not None:
+            self.upscale_rtx_height_spin.setValue(int(str(height)))
+        quality = settings.value("upscale/rtxQuality", "")
+        if quality:
+            self.upscale_rtx_quality_combo.setCurrentText(str(quality))
+        resolution = settings.value("upscale/seedvrResolution", None)
+        if resolution is not None:
+            self.upscale_seedvr_resolution_spin.setValue(int(str(resolution)))
+        max_resolution = settings.value("upscale/seedvrMaxResolution", None)
+        if max_resolution is not None:
+            self.upscale_seedvr_max_resolution_spin.setValue(int(str(max_resolution)))
+        seed = settings.value("upscale/seedvrSeed", None)
+        if seed is not None:
+            self.upscale_seedvr_seed_spin.setValue(int(str(seed)))
+        output_path = settings.value("upscale/outputPath", "")
+        if output_path:
+            self.upscale_output_edit.setText(str(output_path))
+            self._upscale_output_auto = False
+
+    def _set_upscale_output_auto(self, enabled: bool) -> None:
+        self._upscale_output_auto = bool(enabled)
+
+    def _default_upscale_output_path(self) -> Path | None:
+        if not self._loaded:
+            return None
+        return self._loaded.path.with_name(f"{self._loaded.path.stem}_upscaled.png")
+
+    def _unique_upscale_output_path(self, path: Path) -> Path:
+        if not path.exists():
+            return path
+        index = 1
+        while True:
+            candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
+            if not candidate.exists():
+                return candidate
+            index += 1
+
+    def _set_default_upscale_output_path(self) -> None:
+        default_path = self._default_upscale_output_path()
+        if default_path is None:
+            return
+        self.upscale_output_edit.setText(str(self._unique_upscale_output_path(default_path)))
+        self._upscale_output_auto = True
+
+    def _update_upscale_source_label(self) -> None:
+        if self._loaded is None:
+            self.upscale_source_label.setText("Source: No image loaded")
+            return
+        height, width = self._loaded.original_rgb8.shape[:2]
+        self.upscale_source_label.setText(f"Source: {self._loaded.path.name} ({width} x {height})")
+
+    def _on_upscale_resize_type_changed(self, text: str) -> None:
+        is_scale = text == "scale by multiplier"
+        self.upscale_rtx_scale_label.setVisible(is_scale)
+        self.upscale_rtx_scale_spin.setVisible(is_scale)
+        self.upscale_rtx_wh_label.setVisible(not is_scale)
+        self.upscale_rtx_width_spin.setVisible(not is_scale)
+        self.upscale_rtx_height_spin.setVisible(not is_scale)
+
+    def _on_upscale_engine_changed(self, text: str) -> None:
+        is_rtx = text == "NVIDIA RTX"
+        self.upscale_rtx_group.setVisible(is_rtx)
+        self.upscale_seedvr_group.setVisible(not is_rtx)
+
+    def _update_upscale_controls(self) -> None:
+        busy = self._upscale_worker is not None and self._upscale_worker.isRunning()
+        has_image = self._loaded is not None
+        watcher = self._comfyui_launch_watcher
+        watcher_starting = watcher is not None and watcher.isRunning() and not watcher.ready
+        comfyui_managed = self._comfyui_launch_is_active()
+        self.upscale_run_btn.setEnabled(has_image and not busy and not watcher_starting)
+        self.upscale_package_btn.setEnabled(has_image and not busy and not watcher_starting)
+        self.upscale_cancel_btn.setEnabled(busy)
+        self.upscale_launch_btn.setEnabled(not watcher_starting and not busy and not comfyui_managed)
+        self.upscale_stop_btn.setEnabled(comfyui_managed)
+        controls_enabled = not busy and not watcher_starting
+        for group in (
+            self.upscale_connection_group,
+            self.upscale_rtx_group,
+            self.upscale_seedvr_group,
+            self.upscale_launch_group,
+            self.upscale_output_group,
+        ):
+            group.setEnabled(controls_enabled)
+
+    def _save_upscale_settings(self) -> None:
+        settings = self._settings
+        settings.setValue("upscale/comfyUrl", self._normalise_comfy_url())
+        settings.setValue("upscale/engine", self.upscale_engine_combo.currentText())
+        settings.setValue("upscale/rtxResizeType", self.upscale_rtx_resize_type_combo.currentText())
+        settings.setValue("upscale/rtxScale", self.upscale_rtx_scale_spin.value())
+        settings.setValue("upscale/rtxWidth", self.upscale_rtx_width_spin.value())
+        settings.setValue("upscale/rtxHeight", self.upscale_rtx_height_spin.value())
+        settings.setValue("upscale/rtxQuality", self.upscale_rtx_quality_combo.currentText())
+        settings.setValue("upscale/seedvrResolution", self.upscale_seedvr_resolution_spin.value())
+        settings.setValue("upscale/seedvrMaxResolution", self.upscale_seedvr_max_resolution_spin.value())
+        settings.setValue("upscale/seedvrSeed", self.upscale_seedvr_seed_spin.value())
+        settings.setValue("upscale/comfyuiPython", self.upscale_python_edit.text().strip())
+        settings.setValue("upscale/comfyuiMain", self.upscale_main_edit.text().strip())
+        settings.setValue("upscale/comfyuiExtraArgs", self.upscale_extra_args_edit.text().strip())
+        settings.setValue(
+            "upscale/outputPath",
+            "" if self._upscale_output_auto else self.upscale_output_edit.text().strip(),
+        )
+        settings.sync()
+
+    def _cleanup_upscale_source_temp(self) -> None:
+        temp_path = self._upscale_source_temp
+        self._upscale_source_temp = None
+        if temp_path is None:
+            return
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _append_upscale_log(self, message: str) -> None:
+        self.upscale_log.appendPlainText(str(message))
+
+    def _normalise_comfy_url(self) -> str:
+        url = self.upscale_url_edit.text().strip() or "http://127.0.0.1:8000"
+        if "://" not in url:
+            url = f"http://{url}"
+        return url.rstrip("/")
+
+    def _parse_upscale_extra_args(self) -> tuple[str, ...]:
+        text = self.upscale_extra_args_edit.text().strip()
+        if not text:
+            return ()
+        try:
+            values = shlex.split(text, posix=False)
+        except ValueError:
+            values = text.split()
+        return tuple(value.strip('"') for value in values)
+
+    def _comfyui_is_running(self, url: str) -> bool:
+        try:
+            with urllib.request.urlopen(f"{url}/system_stats", timeout=3):
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _comfyui_launch_is_active(self) -> bool:
+        watcher = self._comfyui_launch_watcher
+        if watcher is None:
+            return False
+        if watcher.isRunning():
+            return True
+        process = watcher.process
+        return process is not None and process.poll() is None
+
+    def _on_browse_upscale_python(self) -> None:
+        current = self.upscale_python_edit.text().strip()
+        start = str(Path(current).parent) if current else str(Path.home())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select ComfyUI Python",
+            start,
+            "Executables (*.exe);;All Files (*)",
+        )
+        if path:
+            self.upscale_python_edit.setText(path)
+
+    def _on_browse_upscale_main(self) -> None:
+        current = self.upscale_main_edit.text().strip()
+        start = str(Path(current).parent) if current else str(Path.home())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select ComfyUI main.py",
+            start,
+            "Python Files (*.py);;All Files (*)",
+        )
+        if path:
+            self.upscale_main_edit.setText(path)
+
+    def _on_browse_upscale_output(self) -> None:
+        current = self.upscale_output_edit.text().strip()
+        if not current:
+            default_path = self._default_upscale_output_path()
+            current = str(default_path) if default_path else str(Path.home() / "upscaled.png")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Choose Upscale Output",
+            current,
+            "PNG (*.png)",
+        )
+        if path:
+            output_path = Path(path)
+            if output_path.suffix.lower() != ".png":
+                output_path = output_path.with_suffix(".png")
+            self.upscale_output_edit.setText(str(output_path))
+            self._upscale_output_auto = False
+
+    def _on_launch_comfyui(self) -> None:
+        if self._comfyui_launch_is_active():
+            return
+
+        python = self.upscale_python_edit.text().strip()
+        main_py = self.upscale_main_edit.text().strip()
+        if not python or not Path(python).is_file():
+            QtWidgets.QMessageBox.warning(self, "ComfyUI", "Choose a valid ComfyUI Python executable first.")
+            return
+        if not main_py or not Path(main_py).is_file():
+            QtWidgets.QMessageBox.warning(self, "ComfyUI", "Choose a valid ComfyUI main.py first.")
+            return
+
+        url = self._normalise_comfy_url()
+        self.upscale_url_edit.setText(url)
+        if self._comfyui_is_running(url):
+            self._append_upscale_log(f"ComfyUI is already running at {url}")
+            self.upscale_status_label.setText("ComfyUI ready")
+            return
+
+        self.upscale_launch_btn.setEnabled(False)
+        self.upscale_status_label.setText("Launching ComfyUI...")
+        self._upscale_comfyui_stopping = False
+        watcher = ComfyUILaunchWatcher(
+            python=python,
+            main_py=main_py,
+            comfy_url=url,
+            extra_args=self._parse_upscale_extra_args(),
+        )
+        watcher.setParent(self)
+        self._comfyui_launch_watcher = watcher
+        watcher.log.connect(self._append_upscale_log)
+        watcher.completed.connect(self._on_comfyui_launch_completed)
+        watcher.finished.connect(self._on_comfyui_launch_finished)
+        watcher.start()
+
+    def _on_comfyui_launch_completed(self, success: bool) -> None:
+        self.upscale_status_label.setText("ComfyUI ready" if success else "ComfyUI launch failed")
+        self._update_upscale_controls()
+
+    def _on_comfyui_launch_finished(self) -> None:
+        watcher = self._comfyui_launch_watcher
+        if self._upscale_comfyui_stopping:
+            self.upscale_status_label.setText("ComfyUI stopped")
+        if watcher is not None and watcher.ready and not self._upscale_comfyui_stopping:
+            self._update_upscale_controls()
+            return
+        self._comfyui_launch_watcher = None
+        if watcher is not None:
+            watcher.deleteLater()
+        self._upscale_comfyui_stopping = False
+        self._update_upscale_controls()
+
+    def _on_stop_comfyui(self) -> None:
+        watcher = self._comfyui_launch_watcher
+        if watcher is None:
+            self._append_upscale_log("No ComfyUI instance is managed by this app")
+            return
+        self._upscale_comfyui_stopping = True
+        watcher.shutdown()
+        self.upscale_status_label.setText("Stopping ComfyUI...")
+        if not watcher.isRunning():
+            self._comfyui_launch_watcher = None
+            watcher.deleteLater()
+            self._upscale_comfyui_stopping = False
+            self.upscale_status_label.setText("ComfyUI stopped")
+            self._update_upscale_controls()
+
+    def _render_color_corrected_rgb8(self) -> np.ndarray:
+        if not self._loaded:
+            raise RuntimeError("Load an image first")
+        return process_rgb8_stack(
+            self._loaded.original_rgb8,
+            [self._base_params, self._effective_adjust_params()],
+            self._strength,
+        )
+
+    def _render_upscale_source_rgb8(self) -> np.ndarray:
+        return self._render_color_corrected_rgb8()
+
+    def _render_censored_output_rgb8(self) -> np.ndarray:
+        return apply_censor_blur(
+            self._render_color_corrected_rgb8(),
+            self._censor_circles,
+            self._censor_blur_radius,
+        )
+
+    def _package_output_exists(self, paths: UpscalePackagePaths) -> list[Path]:
+        return [
+            path
+            for path in (paths.censored_path, paths.archive_path, paths.upscaled_path)
+            if path.exists()
+        ]
+
+    def _confirm_upscale_package_overwrite(self, paths: UpscalePackagePaths) -> bool:
+        existing = self._package_output_exists(paths)
+        if not existing:
+            return True
+        names = "\n".join(path.name for path in existing)
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Overwrite Package",
+            f"These generated files already exist in:\n{paths.directory}\n\n{names}\n\nOverwrite them?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return answer == QtWidgets.QMessageBox.StandardButton.Yes
+
+    def _cleanup_upscale_package_temp(self) -> None:
+        temp_path = self._upscale_package_censored_temp
+        self._upscale_package_censored_temp = None
+        if temp_path is None:
+            return
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _reset_upscale_package_state(self) -> None:
+        self._cleanup_upscale_package_temp()
+        self._upscale_package_mode = False
+        self._upscale_package_paths = None
+
+    def _on_run_upscale(self) -> None:
+        self._start_upscale(package=False)
+
+    def _on_upscale_and_zip(self) -> None:
+        self._start_upscale(package=True)
+
+    def _start_upscale(self, package: bool) -> None:
+        if self._upscale_worker is not None and self._upscale_worker.isRunning():
+            QtWidgets.QMessageBox.information(self, "Upscale", "An upscale is already running.")
+            return
+        if not self._loaded:
+            QtWidgets.QMessageBox.information(self, "Upscale", "Load an image first.")
+            return
+
+        package_paths: UpscalePackagePaths | None = None
+        if package:
+            if not self._censor_circles:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Upscale and Zip",
+                    "Add at least one censor circle before creating a preview package.",
+                )
+                return
+            package_paths = build_upscale_package_paths(self._loaded.path)
+            if not self._confirm_upscale_package_overwrite(package_paths):
+                return
+            output_path = package_paths.upscaled_path
+        else:
+            output_text = self.upscale_output_edit.text().strip()
+            if self._upscale_output_auto or not output_text:
+                default_path = self._default_upscale_output_path()
+                if default_path is None:
+                    return
+                output_path = self._unique_upscale_output_path(default_path)
+                self.upscale_output_edit.setText(str(output_path))
+                self._upscale_output_auto = True
+            else:
+                output_path = Path(output_text)
+                if output_path.suffix.lower() != ".png":
+                    QtWidgets.QMessageBox.warning(self, "Upscale", "The output file must use the .png extension.")
+                    return
+                try:
+                    same_as_source = output_path.resolve() == self._loaded.path.resolve()
+                except OSError:
+                    same_as_source = output_path.absolute() == self._loaded.path.absolute()
+                if same_as_source:
+                    QtWidgets.QMessageBox.warning(self, "Upscale", "Choose an output path different from the source image.")
+                    return
+                if output_path.exists():
+                    answer = QtWidgets.QMessageBox.question(
+                        self,
+                        "Overwrite Output",
+                        f"Overwrite this file?\n\n{output_path}",
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                        QtWidgets.QMessageBox.StandardButton.No,
+                    )
+                    if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                        return
+
+        try:
+            rendered = self._render_upscale_source_rgb8()
+            with tempfile.NamedTemporaryFile(
+                prefix="cb_color_correct_upscale_",
+                suffix=".png",
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+            save_metadata_free_rgb8(rendered, temp_path)
+            censored_temp_path: Path | None = None
+            if package:
+                with tempfile.NamedTemporaryFile(
+                    prefix="cb_color_correct_censored_",
+                    suffix=self._loaded.path.suffix or ".png",
+                    delete=False,
+                ) as temp_file:
+                    censored_temp_path = Path(temp_file.name)
+                save_metadata_free_rgb8(self._render_censored_output_rgb8(), censored_temp_path)
+        except Exception as exc:
+            self._cleanup_upscale_source_temp()
+            if "censored_temp_path" in locals() and censored_temp_path is not None:
+                try:
+                    censored_temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            QtWidgets.QMessageBox.critical(self, "Upscale", f"Could not prepare the image:\n\n{exc}")
+            return
+
+        self._upscale_source_temp = temp_path
+        self._upscale_package_mode = package
+        self._upscale_package_paths = package_paths
+        self._upscale_package_censored_temp = censored_temp_path
+        self.upscale_url_edit.setText(self._normalise_comfy_url())
+        settings = UpscaleSettings(
+            source_path=str(temp_path),
+            output_path=str(output_path),
+            comfy_url=self._normalise_comfy_url(),
+            engine=self.upscale_engine_combo.currentText(),
+            resize_type=self.upscale_rtx_resize_type_combo.currentText(),
+            scale=self.upscale_rtx_scale_spin.value(),
+            width=self.upscale_rtx_width_spin.value(),
+            height=self.upscale_rtx_height_spin.value(),
+            quality=self.upscale_rtx_quality_combo.currentText(),
+            seedvr_resolution=self.upscale_seedvr_resolution_spin.value(),
+            seedvr_max_resolution=self.upscale_seedvr_max_resolution_spin.value(),
+            seedvr_seed=self.upscale_seedvr_seed_spin.value(),
+            comfyui_python=self.upscale_python_edit.text().strip(),
+            comfyui_main=self.upscale_main_edit.text().strip(),
+            comfyui_extra_args=self._parse_upscale_extra_args(),
+        )
+        self.upscale_progress.setValue(0)
+        self.upscale_status_label.setText("Starting upscale...")
+        self._append_upscale_log(f"Starting {settings.engine} upscale for {self._loaded.path.name}")
+        self._upscale_cancel_requested = False
+        worker = ComfyUpscaleWorker(settings)
+        worker.setParent(self)
+        self._upscale_worker = worker
+        worker.progress.connect(self.upscale_progress.setValue)
+        worker.status.connect(self.upscale_status_label.setText)
+        worker.log.connect(self._append_upscale_log)
+        worker.completed.connect(self._on_upscale_completed)
+        worker.finished.connect(worker.deleteLater)
+        self._update_upscale_controls()
+        worker.start()
+
+    def _on_cancel_upscale(self) -> None:
+        worker = self._upscale_worker
+        if worker is None or not worker.isRunning():
+            return
+        self._upscale_cancel_requested = True
+        worker.requestInterruption()
+        self.upscale_cancel_btn.setEnabled(False)
+        self.upscale_status_label.setText("Cancelling upscale...")
+
+    def _on_upscale_completed(self, success: bool, output_path: str) -> None:
+        self._cleanup_upscale_source_temp()
+
+        package_mode = self._upscale_package_mode
+        package_paths = self._upscale_package_paths
+        censored_temp_path = self._upscale_package_censored_temp
+        self._upscale_worker = None
+        self._update_upscale_controls()
+        if success:
+            if package_mode:
+                try:
+                    if package_paths is None or censored_temp_path is None:
+                        raise RuntimeError("Upscale package state is incomplete")
+                    package_paths.directory.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(censored_temp_path, package_paths.censored_path)
+                    create_upscale_zip(Path(output_path), package_paths.archive_path)
+                    Path(output_path).unlink(missing_ok=True)
+                except Exception as exc:
+                    self._append_upscale_log(f"Package creation failed: {exc}")
+                    self._reset_upscale_package_state()
+                    self.upscale_progress.setValue(0)
+                    self.upscale_status_label.setText("Package creation failed")
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Upscale and Zip",
+                        f"The upscale completed, but the package could not be created:\n\n{exc}",
+                    )
+                    self._upscale_cancel_requested = False
+                    return
+
+                self._reset_upscale_package_state()
+                self.upscale_progress.setValue(1)
+                self.upscale_status_label.setText("Upscale and ZIP complete")
+                self._append_upscale_log(f"Censored preview saved to {package_paths.censored_path}")
+                self._append_upscale_log(f"Uncensored upscale ZIP saved to {package_paths.archive_path}")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Upscale and Zip Complete",
+                    f"Package folder:\n{package_paths.directory}\n\n"
+                    f"Preview:\n{package_paths.censored_path.name}\n"
+                    f"ZIP:\n{package_paths.archive_path.name}",
+                )
+                self._upscale_cancel_requested = False
+                return
+
+            self.upscale_progress.setValue(1)
+            self.upscale_status_label.setText("Upscale complete")
+            QtWidgets.QMessageBox.information(self, "Upscale Complete", f"Saved to:\n{output_path}")
+        elif self._upscale_cancel_requested:
+            self.upscale_progress.setValue(0)
+            self.upscale_status_label.setText("Upscale cancelled")
+        else:
+            self.upscale_progress.setValue(0)
+            self.upscale_status_label.setText("Upscale failed")
+        self._reset_upscale_package_state()
+        self._upscale_cancel_requested = False
 
     def _preview_censor_blur_radius(self) -> float:
         if not self._loaded:
@@ -2445,6 +3202,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image_label.setPixmap(scaled)
         self.image_label.setFixedSize(scaled.size())
         self._set_zoom_label()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._save_upscale_settings()
+
+        worker = self._upscale_worker
+        if worker is not None and worker.isRunning():
+            worker.requestInterruption()
+            worker.wait()
+
+        watcher = self._comfyui_launch_watcher
+        if watcher is not None and self._comfyui_launch_is_active():
+            watcher.shutdown()
+            if watcher.isRunning():
+                watcher.wait()
+
+        self._cleanup_upscale_source_temp()
+        self._reset_upscale_package_state()
+        super().closeEvent(event)
 
 
 def main() -> int:

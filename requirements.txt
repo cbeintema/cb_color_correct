@@ -3,3 +3,5 @@ Pillow
 numpy
 scipy
 pilgram2
+requests
+websocket-client
