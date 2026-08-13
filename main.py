@@ -12,11 +12,15 @@ import numpy as np
 from PIL import Image
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from cb_color_correct.censor import CensorCircle, apply_censor_blur
 from cb_color_correct.filters import FilterPreset, presets
 from cb_color_correct.image_ops import FilterParams, process_rgb8_stack
 from cb_color_correct.lut import CubeParseError, load_cube
 from cb_color_correct.curve_editor import CurveEditor
 from cb_color_correct.theme import apply_ableton_theme
+
+
+DEFAULT_CENSOR_BLUR_RADIUS = 24
 
 
 def validate_packages() -> None:
@@ -75,6 +79,8 @@ class _RenderTask(QtCore.QRunnable):
         base_params: FilterParams,
         adjust_params: FilterParams,
         strength: float,
+        censor_circles: tuple[CensorCircle, ...] = (),
+        censor_blur_radius: float = 0.0,
     ) -> None:
         super().__init__()
         self.generation = generation
@@ -82,11 +88,15 @@ class _RenderTask(QtCore.QRunnable):
         self.base_params = base_params
         self.adjust_params = adjust_params
         self.strength = strength
+        self.censor_circles = tuple(censor_circles)
+        self.censor_blur_radius = float(censor_blur_radius)
         self.signals = _RenderSignals()
 
     def run(self) -> None:
         try:
             rgb8 = process_rgb8_stack(self.preview_rgb8, [self.base_params, self.adjust_params], self.strength)
+            if self.censor_circles:
+                rgb8 = apply_censor_blur(rgb8, self.censor_circles, self.censor_blur_radius)
             self.signals.finished.emit(self.generation, rgb8)
         except Exception:
             self.signals.failed.emit(self.generation, traceback.format_exc())
@@ -167,11 +177,13 @@ class LoadedImage:
     preview_rgb8: np.ndarray
 
 
-@dataclass
+@dataclass(frozen=True)
 class _HistoryState:
     base_params: FilterParams
     adjust_params: FilterParams
     strength: float
+    censor_circles: tuple[CensorCircle, ...] = ()
+    censor_blur_radius: int = DEFAULT_CENSOR_BLUR_RADIUS
 
 
 class _FixedRowHeightDelegate(QtWidgets.QStyledItemDelegate):
@@ -276,6 +288,135 @@ class _PanScrollArea(QtWidgets.QScrollArea):
         super().wheelEvent(event)
 
 
+class CensorImageLabel(QtWidgets.QLabel):
+    circleCreated = QtCore.Signal(object)
+
+    def __init__(self, text: str = "", parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._censor_enabled = False
+        self._space_pan_active = False
+        self._censor_circles: tuple[CensorCircle, ...] = ()
+        self._drag_start: QtCore.QPointF | None = None
+        self._drag_current: QtCore.QPointF | None = None
+        self.setMouseTracking(True)
+
+    def set_censor_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if not enabled:
+            self.cancel_censor_drag()
+        self._censor_enabled = enabled
+        self._set_idle_cursor()
+        self.update()
+
+    def set_space_pan_active(self, active: bool) -> None:
+        self._space_pan_active = bool(active)
+        self._set_idle_cursor()
+
+    def set_censor_circles(self, circles: tuple[CensorCircle, ...]) -> None:
+        self._censor_circles = tuple(circles)
+        self.update()
+
+    def cancel_censor_drag(self) -> bool:
+        if self._drag_start is None:
+            return False
+        self._drag_start = None
+        self._drag_current = None
+        self.releaseMouse()
+        self._set_idle_cursor()
+        self.update()
+        return True
+
+    def _set_idle_cursor(self) -> None:
+        if not self._censor_enabled:
+            self.unsetCursor()
+        elif self._space_pan_active:
+            self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+
+    def _circle_rect(self, circle: CensorCircle) -> QtCore.QRectF:
+        radius = float(circle.radius) * self.width()
+        center = QtCore.QPointF(float(circle.center_x) * self.width(), float(circle.center_y) * self.height())
+        return QtCore.QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0)
+
+    def _drag_circle(self) -> CensorCircle | None:
+        if self._drag_start is None or self._drag_current is None or self.width() <= 0:
+            return None
+        dx = self._drag_current.x() - self._drag_start.x()
+        dy = self._drag_current.y() - self._drag_start.y()
+        distance = float(np.hypot(dx, dy))
+        return CensorCircle(
+            center_x=max(0.0, min(1.0, self._drag_start.x() / self.width())),
+            center_y=max(0.0, min(1.0, self._drag_start.y() / max(1, self.height()))),
+            radius=distance / self.width(),
+        )
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+            if self._censor_enabled:
+                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            event.ignore()
+            return
+        if (
+            event.button() == QtCore.Qt.MouseButton.LeftButton
+            and self._censor_enabled
+            and not self._space_pan_active
+            and self.pixmap()
+            and not self.pixmap().isNull()
+        ):
+            self._drag_start = QtCore.QPointF(event.position())
+            self._drag_current = QtCore.QPointF(event.position())
+            self.grabMouse()
+            event.accept()
+            self.update()
+            return
+        event.ignore()
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._drag_start is not None:
+            self._drag_current = QtCore.QPointF(event.position())
+            event.accept()
+            self.update()
+            return
+        event.ignore()
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._drag_start is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._drag_current = QtCore.QPointF(event.position())
+            circle = self._drag_circle()
+            self._drag_start = None
+            self._drag_current = None
+            self.releaseMouse()
+            self._set_idle_cursor()
+            event.accept()
+            self.update()
+            if circle is not None and circle.radius * self.width() >= 4.0:
+                self.circleCreated.emit(circle)
+            return
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+            self._set_idle_cursor()
+        event.ignore()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        super().paintEvent(event)
+        if not self._censor_enabled:
+            return
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 210, 80, 230), 2))
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 210, 80, 45)))
+        for circle in self._censor_circles:
+            painter.drawEllipse(self._circle_rect(circle))
+
+        drag_circle = self._drag_circle()
+        if drag_circle is not None:
+            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 230), 2, QtCore.Qt.PenStyle.DashLine))
+            painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 35)))
+            painter.drawEllipse(self._circle_rect(drag_circle))
+        painter.end()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -293,6 +434,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._split_preview_enabled = False
         self._split_divider_ratio = 0.5
         self._dragging_split_divider = False
+        self._censor_enabled = False
+        self._censor_circles: tuple[CensorCircle, ...] = ()
+        self._censor_blur_radius = DEFAULT_CENSOR_BLUR_RADIUS
         self._undo_stack: list[_HistoryState] = []
         self._redo_stack: list[_HistoryState] = []
         self._history_restoring = False
@@ -470,7 +614,7 @@ class MainWindow(QtWidgets.QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
 
-        self.image_label = QtWidgets.QLabel("Load an image to begin")
+        self.image_label = CensorImageLabel("Load an image to begin")
         self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.image_label.setMinimumSize(1, 1)
         self.image_label.installEventFilter(self)
@@ -516,11 +660,34 @@ class MainWindow(QtWidgets.QMainWindow):
         zoom_row_layout.addWidget(self.zoom_actual_btn)
         zoom_row_layout.addWidget(self.zoom_value_label)
 
+        self.censor_toolbar = QtWidgets.QWidget()
+        censor_toolbar_layout = QtWidgets.QHBoxLayout(self.censor_toolbar)
+        censor_toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        censor_toolbar_layout.setSpacing(6)
+        self.censor_btn = QtWidgets.QPushButton("Censor")
+        self.censor_btn.setCheckable(True)
+        self.censor_blur_label = QtWidgets.QLabel("Blur")
+        self.censor_blur_spin = QtWidgets.QSpinBox()
+        self.censor_blur_spin.setRange(1, 100)
+        self.censor_blur_spin.setValue(DEFAULT_CENSOR_BLUR_RADIUS)
+        self.censor_blur_spin.setSuffix(" px")
+        self.censor_blur_spin.setFixedWidth(82)
+        self.censor_remove_btn = QtWidgets.QPushButton("Remove Last")
+        self.censor_clear_btn = QtWidgets.QPushButton("Clear")
+        censor_toolbar_layout.addWidget(self.censor_btn)
+        censor_toolbar_layout.addWidget(self.censor_blur_label)
+        censor_toolbar_layout.addWidget(self.censor_blur_spin)
+        censor_toolbar_layout.addWidget(self.censor_remove_btn)
+        censor_toolbar_layout.addWidget(self.censor_clear_btn)
+        censor_toolbar_layout.addStretch(1)
+        self.censor_toolbar.setEnabled(False)
+
         self.scroll = _PanScrollArea()
         self.scroll.setWidgetResizable(False)
         self.scroll.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.scroll.setWidget(self.image_label)
         preview_layout.addWidget(zoom_row)
+        preview_layout.addWidget(self.censor_toolbar)
         preview_layout.addWidget(self.scroll, 1)
         right_layout.addWidget(preview_panel, 1)
 
@@ -590,6 +757,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.undo_btn.clicked.connect(self._on_undo)
         self.redo_btn.clicked.connect(self._on_redo)
         self.split_preview_btn.toggled.connect(self._on_split_preview_toggled)
+        self.censor_btn.toggled.connect(self._on_censor_toggled)
+        self.censor_blur_spin.valueChanged.connect(self._on_censor_blur_changed)
+        self.censor_remove_btn.clicked.connect(self._on_censor_remove_last)
+        self.censor_clear_btn.clicked.connect(self._on_censor_clear)
+        self.image_label.circleCreated.connect(self._on_censor_circle_created)
         self.scroll.pinchZoomRequested.connect(self._on_pinch_zoom)
         self.scroll.wheelZoomRequested.connect(self._on_wheel_zoom)
 
@@ -607,6 +779,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_shortcut.activated.connect(self._on_load)
         self.save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, self)
         self.save_shortcut.activated.connect(self._on_save)
+        self.censor_escape_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Escape"), self)
+        self.censor_escape_shortcut.activated.connect(self.image_label.cancel_censor_drag)
+        self.censor_escape_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
         self.undo_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Undo, self)
         self.undo_shortcut.activated.connect(self._on_undo)
         self.undo_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
@@ -663,6 +838,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_btn.setToolTip(f"Save image ({save_hint})")
 
         self._history_last_state = self._make_history_state()
+        self._update_censor_controls()
 
         self._apply_current()
 
@@ -698,6 +874,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._loaded = LoadedImage(path=path, original_rgb8=original_rgb8, preview_rgb8=preview_rgb8)
         self._original_preview_pixmap = QtGui.QPixmap.fromImage(rgb8_to_qimage(preview_rgb8))
+        self._censor_circles = ()
+        self._censor_blur_radius = DEFAULT_CENSOR_BLUR_RADIUS
+        self.censor_blur_spin.blockSignals(True)
+        self.censor_blur_spin.setValue(DEFAULT_CENSOR_BLUR_RADIUS)
+        self.censor_blur_spin.blockSignals(False)
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._history_last_state = self._make_history_state()
+        self._update_censor_controls()
         self.save_btn.setEnabled(True)
         self._zoom_mode = "fit"
         self._zoom_factor = 1.0
@@ -723,7 +908,55 @@ class MainWindow(QtWidgets.QMainWindow):
             [self._base_params, self._effective_adjust_params()],
             self._strength,
         )
+        rgb8 = apply_censor_blur(rgb8, self._censor_circles, self._censor_blur_radius)
         Image.fromarray(rgb8, mode="RGB").save(out_path)
+
+    def _on_censor_toggled(self, checked: bool) -> None:
+        self._censor_enabled = bool(checked)
+        if self._censor_enabled and self.split_preview_btn.isChecked():
+            self.split_preview_btn.setChecked(False)
+        self.split_preview_btn.setEnabled(not self._censor_enabled)
+        self.image_label.set_censor_enabled(self._censor_enabled)
+        self._update_censor_controls()
+
+    def _on_censor_circle_created(self, circle: object) -> None:
+        if not isinstance(circle, CensorCircle):
+            return
+        self._censor_circles = self._censor_circles + (circle,)
+        self._record_history_if_changed()
+        self._update_censor_controls()
+        self._schedule_apply()
+
+    def _on_censor_blur_changed(self, value: int) -> None:
+        self._censor_blur_radius = int(value)
+        self._record_history_if_changed()
+        self._schedule_apply()
+
+    def _on_censor_remove_last(self) -> None:
+        if not self._censor_circles:
+            return
+        self._censor_circles = self._censor_circles[:-1]
+        self._record_history_if_changed()
+        self._update_censor_controls()
+        self._schedule_apply()
+
+    def _on_censor_clear(self) -> None:
+        if not self._censor_circles:
+            return
+        if len(self._censor_circles) > 1:
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Clear Censor Regions",
+                "Remove all censor regions?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+        self._censor_circles = ()
+        self._record_history_if_changed()
+        self._update_censor_controls()
+        self._schedule_apply()
 
     def _on_load_lut(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1156,6 +1389,8 @@ class MainWindow(QtWidgets.QMainWindow):
             base_params=self._base_params,
             adjust_params=self._adjust_params,
             strength=self._strength,
+            censor_circles=tuple(self._censor_circles),
+            censor_blur_radius=int(self._censor_blur_radius),
         )
 
     def _history_state_equal(self, a: _HistoryState, b: _HistoryState) -> bool:
@@ -1163,6 +1398,8 @@ class MainWindow(QtWidgets.QMainWindow):
             a.base_params == b.base_params
             and a.adjust_params == b.adjust_params
             and abs(a.strength - b.strength) < 1e-9
+            and a.censor_circles == b.censor_circles
+            and a.censor_blur_radius == b.censor_blur_radius
         )
 
     def _record_history_if_changed(self) -> None:
@@ -1182,9 +1419,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._base_params = state.base_params
         self._adjust_params = state.adjust_params
         self._strength = float(state.strength)
+        self._censor_circles = tuple(state.censor_circles)
+        self._censor_blur_radius = int(state.censor_blur_radius)
         self.strength_slider.setValue(int(round(self._strength * 100.0)))
         self.strength_label.setText(f"Strength: {int(round(self._strength * 100.0))}%")
+        self.censor_blur_spin.blockSignals(True)
+        self.censor_blur_spin.setValue(self._censor_blur_radius)
+        self.censor_blur_spin.blockSignals(False)
         self._sync_adjustment_widgets_from_state()
+        self._update_censor_controls()
         self._history_restoring = False
         self._history_last_state = self._make_history_state()
         self._schedule_apply()
@@ -1260,6 +1503,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_zoom(self._current_zoom_factor() * float(factor), anchor)
 
     def _on_split_preview_toggled(self, checked: bool) -> None:
+        if checked and self._censor_enabled:
+            self.split_preview_btn.setChecked(False)
+            return
         self._split_preview_enabled = bool(checked)
         self._dragging_split_divider = False
         if not self._split_preview_enabled:
@@ -1318,9 +1564,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refit_pixmap()
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() == int(QtCore.Qt.Key.Key_Escape) and self.image_label.cancel_censor_drag():
+            event.accept()
+            return
         if event.key() == int(QtCore.Qt.Key.Key_Space) and not event.isAutoRepeat():
             self._space_pan_active = True
             self.scroll.set_space_pan_enabled(True)
+            self.image_label.set_space_pan_active(True)
             event.accept()
             return
         if (
@@ -1388,6 +1638,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if event.key() == int(QtCore.Qt.Key.Key_Space) and not event.isAutoRepeat():
             self._space_pan_active = False
             self.scroll.set_space_pan_enabled(False)
+            self.image_label.set_space_pan_active(False)
             event.accept()
             return
         super().keyReleaseEvent(event)
@@ -1411,6 +1662,8 @@ class MainWindow(QtWidgets.QMainWindow):
             base_params=self._base_params,
             adjust_params=self._effective_adjust_params(),
             strength=self._strength,
+            censor_circles=self._censor_circles,
+            censor_blur_radius=self._preview_censor_blur_radius(),
         )
         task.signals.finished.connect(self._on_render_finished)
         task.signals.failed.connect(self._on_render_failed)
@@ -1429,6 +1682,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # Keep it quiet in normal operation; show a dialog only for current render failure.
         QtWidgets.QMessageBox.critical(self, "Render Error", err)
+
+    def _preview_censor_blur_radius(self) -> float:
+        if not self._loaded:
+            return float(self._censor_blur_radius)
+        preview_width = self._loaded.preview_rgb8.shape[1]
+        original_width = self._loaded.original_rgb8.shape[1]
+        return float(self._censor_blur_radius) * preview_width / max(1, original_width)
+
+    def _update_censor_controls(self) -> None:
+        has_image = self._loaded is not None
+        self.censor_toolbar.setEnabled(has_image)
+        self.censor_remove_btn.setEnabled(bool(self._censor_circles))
+        self.censor_clear_btn.setEnabled(bool(self._censor_circles))
+        self.image_label.set_censor_circles(self._censor_circles)
+        self.image_label.set_censor_enabled(self._censor_enabled and has_image)
 
     def _build_adjustment_widgets(self) -> None:
         # Tone group
