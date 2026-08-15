@@ -1,0 +1,107 @@
+{
+  "adjust": {
+    "blacks": 0.0,
+    "brightness": 0.0,
+    "channel_mul": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "clarity": 0.0,
+    "contrast": 0.0,
+    "curve_points": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.3039583333333333,
+        0.3560416666666667
+      ],
+      [
+        0.6287499999999998,
+        0.6912500000000001
+      ],
+      [
+        1.0,
+        1.0
+      ]
+    ],
+    "curve_points_b": null,
+    "curve_points_g": null,
+    "curve_points_r": null,
+    "dehaze": 0.0,
+    "exposure": 0.0,
+    "highlights": 0.0,
+    "hue_degrees": 0.0,
+    "levels_black": 0.0,
+    "levels_gamma": 1.0,
+    "levels_white": 1.0,
+    "pilgram_filter": null,
+    "saturation": 0.0,
+    "shadows": 0.0,
+    "split_amount": 0.0,
+    "split_balance": 0.0,
+    "split_highlights": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "split_shadows": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "temperature": 0.0,
+    "tint": 0.0,
+    "vibrance": 0.3,
+    "vignette": 0.0,
+    "vignette_midpoint": 0.5,
+    "whites": 0.0
+  },
+  "base": {
+    "blacks": 0.0,
+    "brightness": 0.0,
+    "channel_mul": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "clarity": 0.0,
+    "contrast": 0.0,
+    "curve_points": null,
+    "curve_points_b": null,
+    "curve_points_g": null,
+    "curve_points_r": null,
+    "dehaze": 0.0,
+    "exposure": 0.0,
+    "highlights": 0.0,
+    "hue_degrees": 0.0,
+    "levels_black": 0.0,
+    "levels_gamma": 1.0,
+    "levels_white": 1.0,
+    "pilgram_filter": null,
+    "saturation": 0.0,
+    "shadows": 0.0,
+    "split_amount": 0.0,
+    "split_balance": 0.0,
+    "split_highlights": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "split_shadows": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "temperature": 0.0,
+    "tint": 0.0,
+    "vibrance": 0.0,
+    "vignette": 0.0,
+    "vignette_midpoint": 0.5,
+    "whites": 0.0
+  },
+  "category": "User",
+  "name": "cb_vibrance"
+}

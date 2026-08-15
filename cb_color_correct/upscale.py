@@ -44,14 +44,20 @@ class UpscalePackagePaths:
     upscaled_path: Path
 
 
-def build_upscale_package_paths(source_path: str | os.PathLike[str]) -> UpscalePackagePaths:
+def build_upscale_package_paths(
+    source_path: str | os.PathLike[str], output_name: str | None = None
+) -> UpscalePackagePaths:
     source = Path(source_path)
-    directory = source.parent / source.stem
+    package_name = output_name.strip() if output_name else ""
+    if package_name and ("/" in package_name or "\\" in package_name):
+        raise ValueError("Output name must be a file name without a path")
+    package_name = package_name or source.stem
+    directory = source.parent / package_name
     return UpscalePackagePaths(
         directory=directory,
-        censored_path=directory / f"{source.stem}_censored{source.suffix}",
-        archive_path=directory / f"{source.stem}.zip",
-        upscaled_path=directory / f"{source.stem}_upscaled.png",
+        censored_path=directory / f"{package_name}_censored{source.suffix}",
+        archive_path=directory / f"{package_name}.zip",
+        upscaled_path=directory / f"{package_name}_upscaled.png",
     )
 
 

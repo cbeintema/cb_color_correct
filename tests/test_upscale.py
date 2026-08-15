@@ -61,6 +61,18 @@ class UpscaleWorkflowTests(unittest.TestCase):
         self.assertEqual(paths.archive_path, Path(r"G:\images\portrait\portrait.zip"))
         self.assertEqual(paths.upscaled_path, Path(r"G:\images\portrait\portrait_upscaled.png"))
 
+    def test_package_paths_use_optional_output_name(self) -> None:
+        paths = build_upscale_package_paths(r"G:\images\portrait.jpg", "delivery")
+
+        self.assertEqual(paths.directory, Path(r"G:\images\delivery"))
+        self.assertEqual(paths.censored_path, Path(r"G:\images\delivery\delivery_censored.jpg"))
+        self.assertEqual(paths.archive_path, Path(r"G:\images\delivery\delivery.zip"))
+        self.assertEqual(paths.upscaled_path, Path(r"G:\images\delivery\delivery_upscaled.png"))
+
+    def test_package_paths_reject_output_name_paths(self) -> None:
+        with self.assertRaises(ValueError):
+            build_upscale_package_paths(r"G:\images\portrait.jpg", "nested/delivery")
+
     def test_create_upscale_zip_contains_only_the_upscaled_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

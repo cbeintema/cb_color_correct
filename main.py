@@ -1845,6 +1845,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         output_group = QtWidgets.QGroupBox("Output")
         output_form = QtWidgets.QFormLayout(output_group)
+        self.upscale_output_name_edit = QtWidgets.QLineEdit()
+        self.upscale_output_name_edit.setPlaceholderText("Optional package name; defaults to source name")
+        output_form.addRow("Package Name", self.upscale_output_name_edit)
         self.upscale_output_edit = QtWidgets.QLineEdit()
         self.upscale_output_edit.setPlaceholderText("Defaults to <source>_upscaled.png")
         self.upscale_output_browse_btn = QtWidgets.QPushButton("Browse")
@@ -1919,6 +1922,7 @@ class MainWindow(QtWidgets.QMainWindow):
         read_text("upscale/comfyuiPython", self.upscale_python_edit)
         read_text("upscale/comfyuiMain", self.upscale_main_edit)
         read_text("upscale/comfyuiExtraArgs", self.upscale_extra_args_edit)
+        read_text("upscale/outputName", self.upscale_output_name_edit)
 
         engine = settings.value("upscale/engine", "")
         if engine:
@@ -2033,6 +2037,7 @@ class MainWindow(QtWidgets.QMainWindow):
         settings.setValue("upscale/comfyuiPython", self.upscale_python_edit.text().strip())
         settings.setValue("upscale/comfyuiMain", self.upscale_main_edit.text().strip())
         settings.setValue("upscale/comfyuiExtraArgs", self.upscale_extra_args_edit.text().strip())
+        settings.setValue("upscale/outputName", self.upscale_output_name_edit.text().strip())
         settings.setValue(
             "upscale/outputPath",
             "" if self._upscale_output_auto else self.upscale_output_edit.text().strip(),
@@ -2273,7 +2278,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Add at least one censor circle before creating a preview package.",
                 )
                 return
-            package_paths = build_upscale_package_paths(self._loaded.path)
+            try:
+                package_paths = build_upscale_package_paths(
+                    self._loaded.path,
+                    self.upscale_output_name_edit.text().strip() or None,
+                )
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self, "Upscale and Zip", str(exc))
+                return
             if not self._confirm_upscale_package_overwrite(package_paths):
                 return
             output_path = package_paths.upscaled_path

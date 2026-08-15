@@ -110,7 +110,7 @@ class MainUpscaleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_path = root / "portrait.jpg"
-            paths = build_upscale_package_paths(source_path)
+            paths = build_upscale_package_paths(source_path, "delivery")
             paths.upscaled_path.parent.mkdir(parents=True)
             paths.upscaled_path.write_bytes(b"uncensored upscale")
             censored_temp_path = root / "censored-temp.jpg"
@@ -126,8 +126,8 @@ class MainUpscaleTests(unittest.TestCase):
             self.assertEqual(paths.censored_path.read_bytes(), b"censored preview")
             self.assertFalse(paths.upscaled_path.exists())
             with zipfile.ZipFile(paths.archive_path) as archive:
-                self.assertEqual(archive.namelist(), ["portrait_upscaled.png"])
-                self.assertEqual(archive.read("portrait_upscaled.png"), b"uncensored upscale")
+                self.assertEqual(archive.namelist(), ["delivery_upscaled.png"])
+                self.assertEqual(archive.read("delivery_upscaled.png"), b"uncensored upscale")
             self.assertFalse(censored_temp_path.exists())
 
 
