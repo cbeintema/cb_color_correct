@@ -671,6 +671,11 @@ class MainWindow(QtWidgets.QMainWindow):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(6)
 
+        self.image_name_label = QtWidgets.QLabel()
+        self.image_name_label.setObjectName("imageNameLabel")
+        self.image_name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.image_name_label.setVisible(False)
+
         zoom_row = QtWidgets.QWidget()
         zoom_row_layout = QtWidgets.QHBoxLayout(zoom_row)
         zoom_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -734,6 +739,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.scroll.setWidget(self.image_label)
         preview_layout.addWidget(zoom_row)
+        preview_layout.addWidget(self.image_name_label)
         preview_layout.addWidget(self.censor_toolbar)
         preview_layout.addWidget(self.scroll, 1)
         right_layout.addWidget(preview_panel, 1)
@@ -924,6 +930,9 @@ class MainWindow(QtWidgets.QMainWindow):
         preview_rgb8 = pil_to_rgb8(preview_pil)
 
         self._loaded = LoadedImage(path=path, original_rgb8=original_rgb8, preview_rgb8=preview_rgb8)
+        self.image_name_label.setText(path.name)
+        self.image_name_label.setToolTip(str(path))
+        self.image_name_label.setVisible(True)
         self._original_preview_pixmap = QtGui.QPixmap.fromImage(rgb8_to_qimage(preview_rgb8))
         self._censor_circles = ()
         self._undo_stack.clear()

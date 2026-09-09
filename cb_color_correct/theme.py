@@ -44,6 +44,7 @@ def apply_ableton_theme(app: QtWidgets.QApplication) -> None:
 
         /* Labels */
         QLabel { background: transparent; }
+        QLabel#imageNameLabel { color: #cfcfcf; font-weight: 600; }
 
         /* Buttons */
         QPushButton, QToolButton {
