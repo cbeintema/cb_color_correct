@@ -21,3 +21,4 @@ dist/
 
 # Qt / app
 *.log
+.description-qa/

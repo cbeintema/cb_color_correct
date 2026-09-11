@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import copy
 from dataclasses import dataclass
 from dataclasses import replace
 import json
@@ -17,6 +18,8 @@ from PIL import Image
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from cb_color_correct.censor import CensorCircle, apply_censor_blur
+from cb_color_correct.description import ImageSnapshot
+from cb_color_correct.description_panel import DescriptionPanel
 from cb_color_correct.filters import FilterPreset, presets
 from cb_color_correct.image_ops import FilterParams, process_rgb8_stack
 from cb_color_correct.image_metadata import save_metadata_free_rgb8
@@ -483,6 +486,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._thread_pool.setMaxThreadCount(1)
         self._render_generation = 0
         self._upscale_worker: ComfyUpscaleWorker | None = None
+        self._description_close_pending = False
         self._comfyui_launch_watcher: ComfyUILaunchWatcher | None = None
         self._upscale_source_temp: Path | None = None
         self._upscale_output_auto = True
@@ -742,9 +746,14 @@ class MainWindow(QtWidgets.QMainWindow):
         preview_layout.addWidget(self.image_name_label)
         preview_layout.addWidget(self.censor_toolbar)
         preview_layout.addWidget(self.scroll, 1)
+        self.description_panel = DescriptionPanel(self._settings, self._description_snapshot)
+        self.description_panel.busy_changed.connect(self._update_upscale_controls)
+        self.description_panel.idle.connect(self._description_idle)
+        self.description_panel.layout_changed.connect(
+            lambda: QtCore.QTimer.singleShot(0, self._refit_pixmap))
         right_layout.addWidget(preview_panel, 1)
 
-        # Collapsible adjustments sidebar
+        # Shared collapsible sidebar for editing tools.
         self.sidebar_container = QtWidgets.QWidget()
         self.sidebar_container.setObjectName("SidebarContainer")
         container_layout = QtWidgets.QVBoxLayout(self.sidebar_container)
@@ -756,7 +765,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sidebar_toggle.setChecked(False)  # collapsed by default
         self.sidebar_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.sidebar_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
-        self.sidebar_toggle.setText("Modifications")
+        self.sidebar_toggle.setText("Tools")
+        self.sidebar_toggle.setToolTip("Show or hide Modifications and Description (M)")
         container_layout.addWidget(self.sidebar_toggle)
 
         self.adjust_sidebar = QtWidgets.QWidget()
@@ -784,7 +794,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_adjustment_widgets()
         sidebar_layout.addWidget(self._adjust_scroll, 1)
 
-        container_layout.addWidget(self.adjust_sidebar, 1)
+        self.sidebar_tabs = QtWidgets.QTabWidget()
+        self.sidebar_tabs.addTab(self.adjust_sidebar, "Modifications")
+        self.description_scroll = QtWidgets.QScrollArea()
+        self.description_scroll.setWidgetResizable(True)
+        self.description_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.description_scroll.setWidget(self.description_panel)
+        self.sidebar_tabs.addTab(self.description_scroll, "Description")
+        container_layout.addWidget(self.sidebar_tabs, 1)
         right_layout.addWidget(self.sidebar_container)
 
         self._set_adjustments_visible(False)
@@ -904,6 +921,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._batch_running = False
 
+        # Let editable fields keep Select All, Undo, Redo, and ordinary typing.
+        QtWidgets.QApplication.instance().focusChanged.connect(self._on_text_focus_changed)
+
+    def _on_text_focus_changed(self, _old, current) -> None:
+        editing = isinstance(current, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit))
+        for shortcut in self.findChildren(QtGui.QShortcut):
+            if shortcut not in (self.open_shortcut, self.save_shortcut):
+                shortcut.setEnabled(not editing)
+
+    def _description_snapshot(self, censored: bool) -> ImageSnapshot:
+        if self._loaded is None:
+            raise RuntimeError("Load an image first.")
+        if self._apply_timer.isActive():
+            # Flush already-captured edits before assigning the request revision.
+            self._apply_timer.stop()
+            self._apply_current()
+        return ImageSnapshot(
+            self._loaded.original_rgb8.copy(), copy.deepcopy(self._base_params),
+            copy.deepcopy(self._effective_adjust_params()), self._strength,
+            self._censor_circles if censored else (), self._censor_blur_radius,
+        )
+
+    def _description_idle(self) -> None:
+        if self._description_close_pending:
+            QtCore.QTimer.singleShot(0, self.close)
+
     def _on_load(self) -> None:
         start_dir = self.last_open_image_dir.strip() if getattr(self, "last_open_image_dir", "") else ""
         if not start_dir or not Path(start_dir).exists():
@@ -930,6 +973,8 @@ class MainWindow(QtWidgets.QMainWindow):
         preview_rgb8 = pil_to_rgb8(preview_pil)
 
         self._loaded = LoadedImage(path=path, original_rgb8=original_rgb8, preview_rgb8=preview_rgb8)
+        self.description_panel.has_image = True
+        self.description_panel.invalidate(new_image=True)
         self.image_name_label.setText(path.name)
         self.image_name_label.setToolTip(str(path))
         self.image_name_label.setVisible(True)
@@ -1440,6 +1485,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _schedule_apply(self) -> None:
         # Debounce rapid slider changes.
+        self.description_panel.invalidate()
         self._apply_timer.start(25)
 
     def _make_history_state(self) -> _HistoryState:
@@ -1622,6 +1668,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refit_pixmap()
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if isinstance(QtWidgets.QApplication.focusWidget(),
+                      (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit)):
+            super().keyPressEvent(event)
+            return
         if event.key() == int(QtCore.Qt.Key.Key_Escape) and self.image_label.cancel_censor_drag():
             event.accept()
             return
@@ -1702,6 +1752,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().keyReleaseEvent(event)
 
     def _apply_current(self) -> None:
+        self.description_panel.has_image = self._loaded is not None
+        self.description_panel.invalidate()
         if not self._loaded:
             self.image_label.setText("Load an image to begin")
             self.image_label.setPixmap(QtGui.QPixmap())
@@ -2012,12 +2064,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_upscale_controls(self) -> None:
         busy = self._upscale_worker is not None and self._upscale_worker.isRunning()
+        description_busy = self.description_panel.busy
+        self.description_panel.upscale_busy = busy
+        self.description_panel.update_controls()
         has_image = self._loaded is not None
         watcher = self._comfyui_launch_watcher
         watcher_starting = watcher is not None and watcher.isRunning() and not watcher.ready
         comfyui_managed = self._comfyui_launch_is_active()
-        self.upscale_run_btn.setEnabled(has_image and not busy and not watcher_starting)
-        self.upscale_package_btn.setEnabled(has_image and not busy and not watcher_starting)
+        self.upscale_run_btn.setEnabled(has_image and not busy and not watcher_starting and not description_busy)
+        self.upscale_package_btn.setEnabled(has_image and not busy and not watcher_starting and not description_busy)
         self.upscale_cancel_btn.setEnabled(busy)
         self.upscale_launch_btn.setEnabled(not watcher_starting and not busy and not comfyui_managed)
         self.upscale_stop_btn.setEnabled(comfyui_managed)
@@ -2271,6 +2326,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._start_upscale(package=True)
 
     def _start_upscale(self, package: bool) -> None:
+        if self.description_panel.busy:
+            QtWidgets.QMessageBox.information(self, "Upscale", "Wait for the description operation or cancel it first.")
+            return
         if self._upscale_worker is not None and self._upscale_worker.isRunning():
             QtWidgets.QMessageBox.information(self, "Upscale", "An upscale is already running.")
             return
@@ -2392,8 +2450,8 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.log.connect(self._append_upscale_log)
         worker.completed.connect(self._on_upscale_completed)
         worker.finished.connect(worker.deleteLater)
-        self._update_upscale_controls()
         worker.start()
+        self._update_upscale_controls()
 
     def _on_cancel_upscale(self) -> None:
         worker = self._upscale_worker
@@ -3019,16 +3077,19 @@ class MainWindow(QtWidgets.QMainWindow):
         return s, lab
 
     def _set_adjustments_visible(self, visible: bool) -> None:
-        self.adjust_sidebar.setVisible(visible)
+        self.sidebar_tabs.setVisible(visible)
+        self.sidebar_toggle.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon if visible
+            else QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.sidebar_toggle.setArrowType(QtCore.Qt.ArrowType.DownArrow if visible else QtCore.Qt.ArrowType.RightArrow)
         # Keep professional/compact: narrow when collapsed, comfortable when expanded
         if visible:
-            # ~70% of the previous expanded width.
-            self.sidebar_container.setMinimumWidth(225)
+            self.sidebar_container.setMinimumWidth(400)
             self.sidebar_container.setMaximumWidth(420)
         else:
             self.sidebar_container.setMinimumWidth(34)
             self.sidebar_container.setMaximumWidth(34)
+        QtCore.QTimer.singleShot(0, self._refit_pixmap)
 
     def _hbox(self, slider: QtWidgets.QSlider, label: QtWidgets.QLabel) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -3225,6 +3286,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_zoom_label()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self.description_panel.save_settings()
+        if self.description_panel.busy:
+            self._description_close_pending = True
+            self.description_panel.cancel()
+            event.ignore()
+            return
         self._save_upscale_settings()
 
         worker = self._upscale_worker
