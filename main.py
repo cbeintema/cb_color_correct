@@ -960,7 +960,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if not fn:
             return
 
-        path = Path(fn)
+        self.load_image(Path(fn))
+
+    def load_image(self, path: Path) -> None:
+        """Load an image from the picker or an Explorer launch."""
         self.last_open_image_dir = str(path.parent)
         self._settings.setValue("lastOpenImageDir", self.last_open_image_dir)
         pil_img = Image.open(path)
@@ -2367,6 +2370,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._upscale_output_auto = True
             else:
                 output_path = Path(output_text)
+                if not output_path.is_absolute():
+                    output_path = self._loaded.path.resolve().parent / output_path
+                self.upscale_output_edit.setText(str(output_path))
                 if output_path.suffix.lower() != ".png":
                     QtWidgets.QMessageBox.warning(self, "Upscale", "The output file must use the .png extension.")
                     return
@@ -3320,6 +3326,11 @@ def main() -> int:
     w = MainWindow()
     w.resize(1200, 800)
     w.show()
+    if len(sys.argv) > 1:
+        try:
+            w.load_image(Path(sys.argv[1]).resolve())
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(w, "Open Image", f"Could not open image:\n{exc}")
     return app.exec()
 
 

@@ -20,6 +20,20 @@ python3 -m venv .venv
 
 ## What it does
 
+### Windows image context menu
+
+After running the app once, double-click `install_context_menu.bat` to add
+**Open in CB Color Correct** for PNG, JPEG, TIFF, BMP, and WebP images.
+On Windows 11, look under **Show more options** if necessary.
+Each invocation opens the selected image in a new app window.
+This installs only for your Windows account and does not require administrator access
+or change the default image viewer. Keep this project folder in place; rerun the
+installer if you move it. To uninstall, run `install_context_menu.bat --remove`.
+
+You can also run `run.bat "C:\path\to\image.jpg"`.
+
+### Editing features
+
 - Load an image
 - Pick a preset (Instagram-like looks)
 - Load a .cube LUT and use it like a preset

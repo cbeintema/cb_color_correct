@@ -29,4 +29,4 @@ if not exist "%PY%" (
   .venv\Scripts\python.exe -m pip install -r requirements.txt
 )
 
-"%PY%" main.py
+"%PY%" main.py %*
