@@ -3318,12 +3318,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> int:
     validate_packages()
-    
+
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            # Distinct AppUserModelID keeps the taskbar from grouping under pythonw.exe's own icon.
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("CBColorCorrect.App")
+        except Exception:
+            pass
+
     app = QtWidgets.QApplication(sys.argv)
 
     apply_ableton_theme(app)
 
+    icon_path = Path(__file__).resolve().parent / "cb_color_correct" / "app_icon.ico"
+    if icon_path.is_file():
+        icon = QtGui.QIcon(str(icon_path))
+        app.setWindowIcon(icon)
+
     w = MainWindow()
+    if icon_path.is_file():
+        w.setWindowIcon(icon)
     w.resize(1200, 800)
     w.show()
     if len(sys.argv) > 1:
