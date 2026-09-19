@@ -32,6 +32,32 @@ installer if you move it. To uninstall, run `install_context_menu.bat --remove`.
 
 You can also run `run.bat "C:\path\to\image.jpg"`.
 
+The installer also adds **Check metadata** for these images and common videos
+(MP4, MOV, M4V, MKV, WebM, AVI, WMV, MPEG, MTS, M2TS, and 3GP).
+Rerun `install_context_menu.bat` to update an existing installation.
+The check opens a small standalone result window and never changes the file.
+It reports **Metadata found**, **Clean — no metadata detected**, or
+**Couldn't complete check**, with detected fields and any read errors.
+Images are checked with Pillow; videos require `ffprobe` from FFmpeg on PATH.
+
+“Clean” means no metadata detected in the checked fields, not a forensic guarantee.
+The check includes EXIF, image text/XMP/IPTC blocks and profiles exposed by Pillow,
+and video container/stream/chapter tags, attachments and stream side data exposed
+by FFprobe. Encoder names and non-default video language/handler tags count as metadata.
+MP4's generic VideoHandler/SoundHandler labels, unspecified language (`und`), and
+zero vendor ID are treated as basic container fields.
+Basic image layout/display fields and video container brands do not count.
+Filesystem timestamps, sidecars and individual video-frame metadata are outside
+this quick check. Video probing times out after 15 seconds; images are checked
+through at most 256 frames/pages, with incomplete checks reported explicitly.
+The same `--remove` command removes both context-menu commands.
+
+The separate installed **Clear meta data** utility has a maintained repair copy at
+`tools/clear_metadata.py`. Its video cleaner strips global/stream tags, chapters,
+and data tracks (including Resolve/QuickTime timecode tracks) while stream-copying
+video, audio and subtitles. It replaces the selected file only after FFmpeg succeeds;
+errors display the FFmpeg details. Normal MP4 structural fields can remain.
+
 ### Editing features
 
 - Load an image
